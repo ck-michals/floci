@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **kms:** implement `ListKeyPolicies`, which previously failed with `UnsupportedOperation`. Returns the single `default` policy name with `Truncated: false` and no `NextMarker`, matching the model ("The only valid value is `default`"). `Limit` and `Marker` are accepted and ignored, since one policy name cannot be paginated and the operation does not declare `InvalidMarkerException` ([#1528](https://github.com/floci-io/floci/issues/1528))
+
 ## [1.5.34] - 2026-07-28
 
 ### Added

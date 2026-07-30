@@ -1054,6 +1054,52 @@ class KmsServiceTest {
                 kmsService.putKeyPolicy("non-existent", "{}", REGION));
     }
 
+    // ── Issue #1528 — ListKeyPolicies ────────────────────────────────────────
+
+    @Test
+    void listKeyPoliciesReturnsDefaultPolicy() {
+        KmsKey key = kmsService.createKey("list-policy-key", REGION);
+
+        Map<String, Object> result = kmsService.listKeyPolicies(key.getKeyId(), null, null, REGION);
+
+        @SuppressWarnings("unchecked")
+        List<String> policyNames = (List<String>) result.get("PolicyNames");
+        assertEquals(1, policyNames.size());
+        assertEquals("default", policyNames.getFirst());
+        assertFalse((Boolean) result.get("Truncated"));
+        // Truncated is always false, so NextMarker must not be emitted at all.
+        assertFalse(result.containsKey("NextMarker"));
+    }
+
+    @Test
+    void listKeyPoliciesResolvesByArnAndAlias() {
+        KmsKey key = kmsService.createKey("list-policy-arn", REGION);
+
+        assertEquals(List.of("default"),
+                kmsService.listKeyPolicies(key.getArn(), null, null, REGION).get("PolicyNames"));
+    }
+
+    @Test
+    void listKeyPoliciesIgnoresLimitAndMarker() {
+        // A single policy name cannot be paginated, and unlike ListKeys / ListAliases / ListGrants /
+        // ListResourceTags this operation does not declare InvalidMarkerException, so there is no
+        // marker it could legitimately reject.
+        KmsKey key = kmsService.createKey("list-policy-paging", REGION);
+
+        for (Integer limit : new Integer[] {null, 1, 1000, 0, 1001}) {
+            Map<String, Object> result = kmsService.listKeyPolicies(key.getKeyId(), limit, "anything", REGION);
+            assertEquals(List.of("default"), result.get("PolicyNames"), "limit=" + limit);
+            assertFalse((Boolean) result.get("Truncated"), "limit=" + limit);
+        }
+    }
+
+    @Test
+    void listKeyPoliciesOnNonExistentKeyThrows() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.listKeyPolicies("non-existent", null, null, REGION));
+        assertEquals("NotFoundException", ex.getErrorCode());
+    }
+
     // ── Issue #290 — Key Rotation ───────────────────────────────────────────
 
     @Test

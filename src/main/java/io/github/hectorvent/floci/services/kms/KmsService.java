@@ -489,6 +489,26 @@ public class KmsService {
         LOG.infov("Updated key policy for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
+    /**
+     * Lists the policy names attached to a key. KMS supports exactly one key policy, named
+     * {@code default}, so the result can never be truncated: {@code Truncated} is always false and
+     * {@code NextMarker} is omitted.
+     *
+     * <p>{@code Limit} and {@code Marker} are accepted and ignored, which is deliberate. A single
+     * policy name fits inside any valid limit, and the model does not declare
+     * {@code InvalidMarkerException} for this operation, unlike the genuinely paginated
+     * {@code ListKeys}, {@code ListAliases}, {@code ListGrants} and {@code ListResourceTags}. There is
+     * therefore no marker this call could legitimately reject.
+     */
+    public Map<String, Object> listKeyPolicies(String keyId, Integer limit, String marker, String region) {
+        String policyName = (String) getKeyPolicy(keyId, region).get("PolicyName");
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("PolicyNames", List.of(policyName));
+        result.put("Truncated", false);
+        return result;
+    }
+
     public void updateKeyDescription(String keyId, String description, String region) {
         KmsKey key = resolveKey(keyId, region);
         key.setDescription(description);
