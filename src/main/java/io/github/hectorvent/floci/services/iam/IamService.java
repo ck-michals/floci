@@ -1018,12 +1018,12 @@ public class IamService implements SessionAccountLookup {
             throw new AwsException("ValidationError", "The OpenID Connect provider URL is not valid.", 400);
         }
         if (thumbprintList != null && thumbprintList.size() > MAX_OIDC_THUMBPRINTS) {
-            throw new AwsException("LimitExceeded",
-                    "An OpenID Connect provider can have at most " + MAX_OIDC_THUMBPRINTS + " thumbprints.", 409);
+            throw new AwsException("InvalidInput",
+                    "Thumbprint list must contain fewer than " + MAX_OIDC_THUMBPRINTS + " entries.", 400);
         }
         if (clientIdList != null && clientIdList.size() > MAX_OIDC_CLIENT_IDS) {
             throw new AwsException("LimitExceeded",
-                    "An OpenID Connect provider can have at most " + MAX_OIDC_CLIENT_IDS + " client IDs.", 409);
+                    "Cannot exceed quota for ClientIdsPerOpenIdConnectProvider: " + MAX_OIDC_CLIENT_IDS, 409);
         }
 
         String arn = iamArn("oidc-provider", "/", normalizedUrl);
@@ -1042,7 +1042,7 @@ public class IamService implements SessionAccountLookup {
         synchronized (oidcProviderLock) {
             if (oidcProviders.get(arn).isPresent()) {
                 throw new AwsException("EntityAlreadyExists",
-                        "Provider with url " + normalizedUrl + " already exists.", 409);
+                        "Provider with url " + url + " already exists.", 409);
             }
             oidcProviders.put(arn, provider);
         }
@@ -1066,7 +1066,10 @@ public class IamService implements SessionAccountLookup {
 
     public void deleteOpenIDConnectProvider(String arn) {
         synchronized (oidcProviderLock) {
-            getOpenIDConnectProvider(arn);
+            if (oidcProviders.get(arn).isEmpty()) {
+                throw new AwsException("NoSuchEntity",
+                        "OpenId connect Provider " + arn + " cannot be found.", 404);
+            }
             oidcProviders.delete(arn);
         }
         LOG.infov("Deleted OIDC provider: {0}", arn);
@@ -1078,13 +1081,14 @@ public class IamService implements SessionAccountLookup {
         }
         synchronized (oidcProviderLock) {
             OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
+            // AWS treats adding a client ID that is already present as a no-op success, so this
+            // returns rather than reporting a conflict.
             if (provider.getClientIdList().contains(clientId)) {
-                throw new AwsException("EntityAlreadyExists",
-                        "The client ID " + clientId + " already exists for provider " + arn + ".", 409);
+                return;
             }
             if (provider.getClientIdList().size() >= MAX_OIDC_CLIENT_IDS) {
                 throw new AwsException("LimitExceeded",
-                        "An OpenID Connect provider can have at most " + MAX_OIDC_CLIENT_IDS + " client IDs.", 409);
+                        "Cannot exceed quota for ClientIdsPerOpenIdConnectProvider: " + MAX_OIDC_CLIENT_IDS, 409);
             }
             List<String> updated = new ArrayList<>(provider.getClientIdList());
             updated.add(clientId);
@@ -1096,9 +1100,9 @@ public class IamService implements SessionAccountLookup {
     public void removeClientIdFromOpenIDConnectProvider(String arn, String clientId) {
         synchronized (oidcProviderLock) {
             OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
+            // Removing a client ID that is not present is a no-op success on AWS, not an error.
             if (!provider.getClientIdList().contains(clientId)) {
-                throw new AwsException("NoSuchEntity",
-                        "The client ID " + clientId + " does not exist for provider " + arn + ".", 404);
+                return;
             }
             List<String> updated = new ArrayList<>(provider.getClientIdList());
             updated.remove(clientId);
@@ -1113,8 +1117,8 @@ public class IamService implements SessionAccountLookup {
                     "The request must contain the parameter ThumbprintList.", 400);
         }
         if (thumbprintList.size() > MAX_OIDC_THUMBPRINTS) {
-            throw new AwsException("LimitExceeded",
-                    "An OpenID Connect provider can have at most " + MAX_OIDC_THUMBPRINTS + " thumbprints.", 409);
+            throw new AwsException("InvalidInput",
+                    "Thumbprint list must contain fewer than " + MAX_OIDC_THUMBPRINTS + " entries.", 400);
         }
         synchronized (oidcProviderLock) {
             OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);

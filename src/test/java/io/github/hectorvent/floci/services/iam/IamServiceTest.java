@@ -867,17 +867,27 @@ class IamServiceTest {
         assertEquals(List.of("sts.amazonaws.com", "extra.audience"),
                 iamService.getOpenIDConnectProvider(provider.getArn()).getClientIdList());
 
-        AwsException duplicate = assertThrows(AwsException.class, () ->
-                iamService.addClientIdToOpenIDConnectProvider(provider.getArn(), "extra.audience"));
-        assertEquals("EntityAlreadyExists", duplicate.getErrorCode());
-
         iamService.removeClientIdFromOpenIDConnectProvider(provider.getArn(), "extra.audience");
         assertEquals(List.of("sts.amazonaws.com"),
                 iamService.getOpenIDConnectProvider(provider.getArn()).getClientIdList());
+    }
 
-        AwsException missing = assertThrows(AwsException.class, () ->
-                iamService.removeClientIdFromOpenIDConnectProvider(provider.getArn(), "never.added"));
-        assertEquals("NoSuchEntity", missing.getErrorCode());
+    /**
+     * Verified against a live AWS account: adding a client ID that is already present and removing
+     * one that was never added both succeed and change nothing.
+     */
+    @Test
+    void clientIdAddAndRemoveAreIdempotent() {
+        OpenIDConnectProvider provider = iamService.createOpenIDConnectProvider(
+                OIDC_URL, List.of("sts.amazonaws.com"), List.of(THUMBPRINT), Map.of());
+
+        iamService.addClientIdToOpenIDConnectProvider(provider.getArn(), "sts.amazonaws.com");
+        assertEquals(List.of("sts.amazonaws.com"),
+                iamService.getOpenIDConnectProvider(provider.getArn()).getClientIdList());
+
+        iamService.removeClientIdFromOpenIDConnectProvider(provider.getArn(), "never.added");
+        assertEquals(List.of("sts.amazonaws.com"),
+                iamService.getOpenIDConnectProvider(provider.getArn()).getClientIdList());
     }
 
     @Test
@@ -902,9 +912,38 @@ class IamServiceTest {
 
     @Test
     void thumbprintListIsCappedAtFive() {
+        // Five is accepted; six is not, and AWS reports InvalidInput rather than LimitExceeded.
+        iamService.createOpenIDConnectProvider(OIDC_URL, List.of(),
+                List.of("a", "b", "c", "d", "e"), Map.of());
+
         AwsException error = assertThrows(AwsException.class, () -> iamService.createOpenIDConnectProvider(
-                OIDC_URL, List.of(), List.of("a", "b", "c", "d", "e", "f"), Map.of()));
+                "https://oidc.example.com/id/six", List.of(), List.of("a", "b", "c", "d", "e", "f"), Map.of()));
+        assertEquals("InvalidInput", error.getErrorCode());
+    }
+
+    @Test
+    void clientIdListIsCappedAtOneHundred() {
+        List<String> tooMany = java.util.stream.IntStream.range(0, 101)
+                .mapToObj(i -> "client-" + i).toList();
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                iamService.createOpenIDConnectProvider(OIDC_URL, tooMany, List.of(THUMBPRINT), Map.of()));
         assertEquals("LimitExceeded", error.getErrorCode());
+    }
+
+    /**
+     * Verified against a live AWS account: AWS does not normalize the URL, so a trailing slash or
+     * a case difference yields a separate provider rather than a duplicate.
+     */
+    @Test
+    void providerUrlsAreNotNormalized() {
+        iamService.createOpenIDConnectProvider(OIDC_URL, List.of(), List.of(THUMBPRINT), Map.of());
+        iamService.createOpenIDConnectProvider(OIDC_URL + "/", List.of(), List.of(THUMBPRINT), Map.of());
+        iamService.createOpenIDConnectProvider(
+                "https://OIDC.eks.eu-central-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B716D3041E",
+                List.of(), List.of(THUMBPRINT), Map.of());
+
+        assertEquals(3, iamService.listOpenIDConnectProviders().size());
     }
 
     @Test

@@ -148,7 +148,14 @@ id: `https://oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLE` becomes
 the same URL twice returns `EntityAlreadyExists`. As on AWS, `GetOpenIDConnectProvider` reports
 the URL **without** its scheme.
 
-The URL must begin with `https://`. A provider holds at most 100 client IDs and 5 thumbprints.
+The URL must begin with `https://` and is at most 255 characters. It is not normalized, matching
+AWS: a trailing slash or a difference in case produces a separate provider rather than a
+duplicate.
+
+A provider holds at most 100 client IDs (`LimitExceeded` beyond that) and 5 thumbprints
+(`InvalidInput` beyond that). Adding a client ID that is already present, and removing one that
+was never added, both succeed and change nothing, as they do on AWS.
+
 Thumbprints are stored and echoed back but never validated against the remote endpoint, since
 nothing here performs the TLS handshake they describe.
 
