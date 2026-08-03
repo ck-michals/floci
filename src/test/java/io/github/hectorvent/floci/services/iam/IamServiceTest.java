@@ -970,6 +970,26 @@ class IamServiceTest {
         assertEquals(3, iamService.listOpenIDConnectProviders().size());
     }
 
+    /**
+     * Verified against a live AWS account: an empty tag map or key list is rejected as InvalidInput
+     * rather than accepted as a no-op.
+     */
+    @Test
+    void oidcTagMutatorsRejectEmptyCollections() {
+        OpenIDConnectProvider provider = iamService.createOpenIDConnectProvider(
+                OIDC_URL, List.of(), List.of(THUMBPRINT), Map.of("env", "prod"));
+
+        assertEquals("InvalidInput", assertThrows(AwsException.class, () ->
+                iamService.tagOpenIDConnectProvider(provider.getArn(), Map.of())).getErrorCode());
+        assertEquals("InvalidInput", assertThrows(AwsException.class, () ->
+                iamService.untagOpenIDConnectProvider(provider.getArn(), List.of())).getErrorCode());
+        assertEquals("ValidationError", assertThrows(AwsException.class, () ->
+                iamService.tagOpenIDConnectProvider(null, Map.of("k", "v"))).getErrorCode());
+
+        // The rejected calls leave the existing tags alone.
+        assertEquals(Map.of("env", "prod"), iamService.listOpenIDConnectProviderTags(provider.getArn()));
+    }
+
     @Test
     void tagAndUntagOpenIDConnectProvider() {
         OpenIDConnectProvider provider = iamService.createOpenIDConnectProvider(

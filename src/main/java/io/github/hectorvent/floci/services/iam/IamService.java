@@ -1141,7 +1141,13 @@ public class IamService implements SessionAccountLookup {
         }
     }
 
+    // AWS rejects an empty tag map rather than treating it as a no-op, and reports InvalidInput
+    // rather than ValidationError. Both verified against a live account.
     public void tagOpenIDConnectProvider(String arn, Map<String, String> newTags) {
+        requireProviderArn(arn);
+        if (newTags == null || newTags.isEmpty()) {
+            throw new AwsException("InvalidInput", "The provided tag map must not be null/empty.", 400);
+        }
         synchronized (oidcProviderLock) {
             OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
             Map<String, String> merged = new LinkedHashMap<>(provider.getTags());
@@ -1152,6 +1158,10 @@ public class IamService implements SessionAccountLookup {
     }
 
     public void untagOpenIDConnectProvider(String arn, List<String> tagKeys) {
+        requireProviderArn(arn);
+        if (tagKeys == null || tagKeys.isEmpty()) {
+            throw new AwsException("InvalidInput", "The provided tag keys must not be null/empty.", 400);
+        }
         synchronized (oidcProviderLock) {
             OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
             Map<String, String> remaining = new LinkedHashMap<>(provider.getTags());
@@ -1162,6 +1172,7 @@ public class IamService implements SessionAccountLookup {
     }
 
     public Map<String, String> listOpenIDConnectProviderTags(String arn) {
+        requireProviderArn(arn);
         return getOpenIDConnectProvider(arn).getTags();
     }
 
