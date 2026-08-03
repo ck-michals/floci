@@ -210,6 +210,33 @@ class Ec2ManagedPrefixListIntegrationTest {
 
     @Test
     @Order(11)
+    void malformedNumericParametersReturnAClientError() {
+        given()
+            .formParam("Action", "GetManagedPrefixListEntries")
+            .formParam("PrefixListId", prefixListId)
+            .formParam("TargetVersion", "not-a-number")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+
+        given()
+            .formParam("Action", "CreateManagedPrefixList")
+            .formParam("PrefixListName", "malformed-max-entries")
+            .formParam("AddressFamily", "IPv4")
+            .formParam("MaxEntries", "plenty")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
+    @Order(12)
     void deleteManagedPrefixList() {
         given()
             .formParam("Action", "DeleteManagedPrefixList")

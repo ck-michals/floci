@@ -694,6 +694,10 @@ public class Ec2Service implements ContainerTeardown {
             }
 
             int effectiveMax = maxEntries != null ? maxEntries : list.getMaxEntries();
+            if (effectiveMax < 1) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid value for maxEntries. It must be greater than 0.", 400);
+            }
             if (updated.size() > effectiveMax) {
                 throw new AwsException("InvalidParameterValue",
                         "The number of entries exceeds the maximum of " + effectiveMax + ".", 400);
@@ -2421,7 +2425,12 @@ public class Ec2Service implements ContainerTeardown {
         NetworkAcl networkAcl = networkAcls.get(storeKey).orElse(null);
         if (networkAcl != null) { networkAcl.setTags(new ArrayList<>(tagList)); networkAcls.put(storeKey, networkAcl); return; }
         Address address = addresses.get(storeKey).orElse(null);
-        if (address != null) { address.setTags(new ArrayList<>(tagList)); addresses.put(storeKey, address); }
+        if (address != null) { address.setTags(new ArrayList<>(tagList)); addresses.put(storeKey, address); return; }
+        ManagedPrefixList prefixList = managedPrefixLists.get(storeKey).orElse(null);
+        if (prefixList != null) {
+            prefixList.setTags(new ArrayList<>(tagList));
+            managedPrefixLists.put(storeKey, prefixList);
+        }
     }
 
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {

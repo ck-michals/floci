@@ -716,6 +716,42 @@ class Ec2ServiceTest {
         assertEquals(List.of("52.216.0.0/15", "54.231.0.0/16"), legacy.getFirst().getCidrs());
     }
 
+    @Test
+    void modifyRejectsANonPositiveMaxEntries() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList created = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+
+        // The list is empty, so a size check alone would let a zero capacity through.
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.modifyManagedPrefixList("us-east-1", created.getPrefixListId(), null, null, 0,
+                        List.of(), List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals(5, service.describeManagedPrefixLists("us-east-1",
+                List.of(created.getPrefixListId()), Map.of()).getFirst().getMaxEntries());
+    }
+
+    @Test
+    void createTagsOnAPrefixListIsVisibleToDescribeAndTagFilters() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList created = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+
+        service.createTags("us-east-1", List.of(created.getPrefixListId()), List.of(new Tag("env", "prod")));
+
+        ManagedPrefixList described = service.describeManagedPrefixLists("us-east-1",
+                List.of(created.getPrefixListId()), Map.of()).getFirst();
+        assertEquals(1, described.getTags().size());
+        assertEquals("prod", described.getTags().getFirst().getValue());
+
+        assertEquals(1, service.describeManagedPrefixLists("us-east-1", List.of(),
+                Map.of("tag:env", List.of("prod"))).size());
+
+        service.deleteTags("us-east-1", List.of(created.getPrefixListId()), List.of(new Tag("env", null)));
+        assertTrue(service.describeManagedPrefixLists("us-east-1", List.of(created.getPrefixListId()), Map.of())
+                .getFirst().getTags().isEmpty());
+    }
+
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);

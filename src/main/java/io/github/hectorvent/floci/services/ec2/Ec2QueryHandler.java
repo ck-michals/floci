@@ -1009,10 +1009,8 @@ public class Ec2QueryHandler {
     }
 
     private Response handleGetManagedPrefixListEntries(MultivaluedMap<String, String> p, String region) {
-        String targetVersion = p.getFirst("TargetVersion");
         List<PrefixListEntry> entries = service.getManagedPrefixListEntries(
-                region, p.getFirst("PrefixListId"),
-                targetVersion != null ? Long.valueOf(targetVersion) : null);
+                region, p.getFirst("PrefixListId"), longOrNull(p, "TargetVersion"));
         XmlBuilder xml = new XmlBuilder()
                 .start("GetManagedPrefixListEntriesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1029,12 +1027,11 @@ public class Ec2QueryHandler {
     }
 
     private Response handleModifyManagedPrefixList(MultivaluedMap<String, String> p, String region) {
-        String currentVersion = p.getFirst("CurrentVersion");
         List<PrefixListEntry> removeEntries = parsePrefixListEntries(p, "RemoveEntry");
         ManagedPrefixList list = service.modifyManagedPrefixList(
                 region,
                 p.getFirst("PrefixListId"),
-                currentVersion != null ? Long.valueOf(currentVersion) : null,
+                longOrNull(p, "CurrentVersion"),
                 p.getFirst("PrefixListName"),
                 intOrNull(p, "MaxEntries"),
                 parsePrefixListEntries(p, "AddEntry"),
@@ -1086,9 +1083,32 @@ public class Ec2QueryHandler {
         return entries;
     }
 
+    // Malformed numerics must surface as a client error, not escape the handler as an
+    // unchecked NumberFormatException and turn into a 500.
     private Integer intOrNull(MultivaluedMap<String, String> p, String name) {
         String value = p.getFirst(name);
-        return value == null || value.isBlank() ? null : Integer.valueOf(value);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid value '" + value + "' for " + name + ".", 400);
+        }
+    }
+
+    private Long longOrNull(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.valueOf(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid value '" + value + "' for " + name + ".", 400);
+        }
     }
 
     private Response handleDeleteVpcEndpoints(MultivaluedMap<String, String> p, String region) {
