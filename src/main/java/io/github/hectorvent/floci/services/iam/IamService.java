@@ -68,6 +68,13 @@ public class IamService implements SessionAccountLookup {
      * single value, and the store is already account-namespaced, so no further keying is needed.
      */
     private final StorageBackend<String, String> accountAliases;
+    /**
+     * Guards the check-then-write in alias create/delete. Unlike a named resource, where two
+     * racing creates carry the same name and either winner is equivalent, racing alias creates
+     * carry different values — an unguarded race would report success to both callers while
+     * silently keeping only one. A single lock across accounts is enough: alias writes are rare.
+     */
+    private final Object accountAliasLock = new Object();
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
     private final String seededAccountAlias;
@@ -1034,12 +1041,14 @@ public class IamService implements SessionAccountLookup {
      */
     public void createAccountAlias(String alias) {
         validateAccountAlias(alias);
-        Optional<String> existing = accountAliases.get(ACCOUNT_ALIAS_KEY);
-        if (existing.isPresent()) {
-            throw new AwsException("EntityAlreadyExists",
-                    "The account alias " + existing.get() + " already exists.", 409);
+        synchronized (accountAliasLock) {
+            Optional<String> existing = accountAliases.get(ACCOUNT_ALIAS_KEY);
+            if (existing.isPresent()) {
+                throw new AwsException("EntityAlreadyExists",
+                        "The account alias " + existing.get() + " already exists.", 409);
+            }
+            accountAliases.put(ACCOUNT_ALIAS_KEY, alias);
         }
-        accountAliases.put(ACCOUNT_ALIAS_KEY, alias);
         LOG.infov("Created IAM account alias: {0}", alias);
     }
 
@@ -1048,14 +1057,16 @@ public class IamService implements SessionAccountLookup {
      * value in a delete call cannot silently clear the current alias.
      */
     public void deleteAccountAlias(String alias) {
-        String existing = accountAliases.get(ACCOUNT_ALIAS_KEY)
-                .orElseThrow(() -> new AwsException("NoSuchEntity",
-                        "The account alias " + alias + " cannot be found.", 404));
-        if (!existing.equals(alias)) {
-            throw new AwsException("NoSuchEntity",
-                    "The account alias " + alias + " cannot be found.", 404);
+        synchronized (accountAliasLock) {
+            String existing = accountAliases.get(ACCOUNT_ALIAS_KEY)
+                    .orElseThrow(() -> new AwsException("NoSuchEntity",
+                            "The account alias " + alias + " cannot be found.", 404));
+            if (!existing.equals(alias)) {
+                throw new AwsException("NoSuchEntity",
+                        "The account alias " + alias + " cannot be found.", 404);
+            }
+            accountAliases.delete(ACCOUNT_ALIAS_KEY);
         }
-        accountAliases.delete(ACCOUNT_ALIAS_KEY);
         LOG.infov("Deleted IAM account alias: {0}", alias);
     }
 

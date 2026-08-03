@@ -128,10 +128,10 @@ teardown() {
 }
 
 @test "IAM: delete account alias" {
-    local alias_name="bats-alias-$(date +%s)-$$"
-    aws_cmd iam create-account-alias --account-alias "$alias_name" >/dev/null
+    ACCOUNT_ALIAS="bats-alias-$(date +%s)-$$"
+    aws_cmd iam create-account-alias --account-alias "$ACCOUNT_ALIAS" >/dev/null
 
-    run aws_cmd iam delete-account-alias --account-alias "$alias_name"
+    run aws_cmd iam delete-account-alias --account-alias "$ACCOUNT_ALIAS"
     assert_success
 
     run aws_cmd iam list-account-aliases
