@@ -892,6 +892,15 @@ class IamServiceTest {
     }
 
     @Test
+    void openIdConnectProviderUrlIsCappedAt255Characters() {
+        String longUrl = "https://oidc.example.com/id/" + "a".repeat(255);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                iamService.createOpenIDConnectProvider(longUrl, List.of(), List.of(THUMBPRINT), Map.of()));
+        assertEquals("ValidationError", error.getErrorCode());
+    }
+
+    @Test
     void thumbprintListIsCappedAtFive() {
         AwsException error = assertThrows(AwsException.class, () -> iamService.createOpenIDConnectProvider(
                 OIDC_URL, List.of(), List.of("a", "b", "c", "d", "e", "f"), Map.of()));

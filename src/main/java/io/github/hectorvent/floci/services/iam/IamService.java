@@ -55,6 +55,7 @@ public class IamService implements SessionAccountLookup {
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
     private static final int MAX_OIDC_CLIENT_IDS = 100;
     private static final int MAX_OIDC_THUMBPRINTS = 5;
+    private static final int MAX_OIDC_URL_LENGTH = 255;
 
     /** Guards the read-modify-write in the OIDC provider mutators. */
     private final Object oidcProviderLock = new Object();
@@ -1006,6 +1007,11 @@ public class IamService implements SessionAccountLookup {
         if (!url.startsWith("https://")) {
             throw new AwsException("ValidationError",
                     "The OpenID Connect provider URL must begin with https://.", 400);
+        }
+        if (url.length() > MAX_OIDC_URL_LENGTH) {
+            throw new AwsException("ValidationError",
+                    "The OpenID Connect provider URL must be at most "
+                            + MAX_OIDC_URL_LENGTH + " characters.", 400);
         }
         String normalizedUrl = url.substring("https://".length());
         if (normalizedUrl.isBlank()) {
