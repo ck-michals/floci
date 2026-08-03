@@ -921,6 +921,30 @@ class IamServiceTest {
         assertEquals("InvalidInput", error.getErrorCode());
     }
 
+    /**
+     * A missing required parameter must fail as a ValidationError before any lookup. A null
+     * ClientID would otherwise read as "not in the list" and report a no-op success, and a null
+     * ARN as a missing provider.
+     */
+    @Test
+    void oidcMutatorsRejectMissingRequiredParameters() {
+        OpenIDConnectProvider provider = iamService.createOpenIDConnectProvider(
+                OIDC_URL, List.of("sts.amazonaws.com"), List.of(THUMBPRINT), Map.of());
+
+        assertEquals("ValidationError", assertThrows(AwsException.class, () ->
+                iamService.removeClientIdFromOpenIDConnectProvider(provider.getArn(), null)).getErrorCode());
+        assertEquals("ValidationError", assertThrows(AwsException.class, () ->
+                iamService.addClientIdToOpenIDConnectProvider(provider.getArn(), "  ")).getErrorCode());
+        assertEquals("ValidationError", assertThrows(AwsException.class, () ->
+                iamService.deleteOpenIDConnectProvider(null)).getErrorCode());
+        assertEquals("ValidationError", assertThrows(AwsException.class, () ->
+                iamService.updateOpenIDConnectProviderThumbprint(null, List.of("aaaa"))).getErrorCode());
+
+        // The provider and its client IDs are untouched by any of the rejected calls.
+        assertEquals(List.of("sts.amazonaws.com"),
+                iamService.getOpenIDConnectProvider(provider.getArn()).getClientIdList());
+    }
+
     @Test
     void clientIdListIsCappedAtOneHundred() {
         List<String> tooMany = java.util.stream.IntStream.range(0, 101)

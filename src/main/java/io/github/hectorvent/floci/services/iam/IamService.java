@@ -1051,10 +1051,7 @@ public class IamService implements SessionAccountLookup {
     }
 
     public OpenIDConnectProvider getOpenIDConnectProvider(String arn) {
-        if (arn == null || arn.isBlank()) {
-            throw new AwsException("ValidationError",
-                    "The request must contain the parameter OpenIDConnectProviderArn.", 400);
-        }
+        requireProviderArn(arn);
         return oidcProviders.get(arn)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "OpenIDConnect Provider not found for arn " + arn, 404));
@@ -1065,6 +1062,7 @@ public class IamService implements SessionAccountLookup {
     }
 
     public void deleteOpenIDConnectProvider(String arn) {
+        requireProviderArn(arn);
         synchronized (oidcProviderLock) {
             if (oidcProviders.get(arn).isEmpty()) {
                 throw new AwsException("NoSuchEntity",
@@ -1076,9 +1074,8 @@ public class IamService implements SessionAccountLookup {
     }
 
     public void addClientIdToOpenIDConnectProvider(String arn, String clientId) {
-        if (clientId == null || clientId.isBlank()) {
-            throw new AwsException("ValidationError", "The request must contain the parameter ClientID.", 400);
-        }
+        requireProviderArn(arn);
+        requireClientId(clientId);
         synchronized (oidcProviderLock) {
             OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
             // AWS treats adding a client ID that is already present as a no-op success, so this
@@ -1098,6 +1095,8 @@ public class IamService implements SessionAccountLookup {
     }
 
     public void removeClientIdFromOpenIDConnectProvider(String arn, String clientId) {
+        requireProviderArn(arn);
+        requireClientId(clientId);
         synchronized (oidcProviderLock) {
             OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
             // Removing a client ID that is not present is a no-op success on AWS, not an error.
@@ -1111,7 +1110,22 @@ public class IamService implements SessionAccountLookup {
         }
     }
 
+    private void requireProviderArn(String arn) {
+        if (arn == null || arn.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter OpenIDConnectProviderArn.", 400);
+        }
+    }
+
+    private void requireClientId(String clientId) {
+        if (clientId == null || clientId.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter ClientID.", 400);
+        }
+    }
+
     public void updateOpenIDConnectProviderThumbprint(String arn, List<String> thumbprintList) {
+        requireProviderArn(arn);
         if (thumbprintList == null || thumbprintList.isEmpty()) {
             throw new AwsException("ValidationError",
                     "The request must contain the parameter ThumbprintList.", 400);
