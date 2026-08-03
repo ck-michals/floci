@@ -803,13 +803,38 @@ class IamServiceTest {
         assertEquals("my-account", iamService.getAccountAlias().orElseThrow());
     }
 
+    /**
+     * Verified against a live AWS account: creating a free alias while another is set replaces it
+     * rather than failing, which is how the one-alias-per-account rule is actually enforced.
+     */
     @Test
-    void createSecondAccountAliasFails() {
+    void createAccountAliasReplacesAnExistingOne() {
+        iamService.createAccountAlias("my-account");
+
+        iamService.createAccountAlias("other-account");
+
+        assertEquals("other-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    /** Re-creating the alias the account already holds is the case AWS rejects. */
+    @Test
+    void createAccountAliasRejectsTheAliasAlreadyHeld() {
         iamService.createAccountAlias("my-account");
 
         AwsException ex = assertThrows(AwsException.class,
-                () -> iamService.createAccountAlias("other-account"));
+                () -> iamService.createAccountAlias("my-account"));
         assertEquals("EntityAlreadyExists", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("my-account"));
+        assertEquals("my-account", iamService.getAccountAlias().orElseThrow());
+    }
+
+    @Test
+    void deleteAccountAliasRejectsAMalformedValue() {
+        iamService.createAccountAlias("my-account");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.deleteAccountAlias("Bad_Alias"));
+        assertEquals("ValidationError", ex.getErrorCode());
         assertEquals("my-account", iamService.getAccountAlias().orElseThrow());
     }
 

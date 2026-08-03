@@ -98,7 +98,7 @@ teardown() {
 }
 
 @test "IAM: create and list account alias" {
-    ACCOUNT_ALIAS="bats-alias-$(date +%s)-$$"
+    ACCOUNT_ALIAS="$(unique_name bats-alias)"
 
     run aws_cmd iam create-account-alias --account-alias "$ACCOUNT_ALIAS"
     assert_success
@@ -109,17 +109,33 @@ teardown() {
     [ "$alias" = "$ACCOUNT_ALIAS" ]
 }
 
-@test "IAM: creating a second account alias fails" {
-    ACCOUNT_ALIAS="bats-alias-$(date +%s)-$$"
+@test "IAM: creating another account alias replaces the current one" {
+    ACCOUNT_ALIAS="$(unique_name bats-alias)"
     aws_cmd iam create-account-alias --account-alias "$ACCOUNT_ALIAS" >/dev/null
 
-    run aws_cmd iam create-account-alias --account-alias "bats-alias-second-$$"
+    local replacement
+    replacement="$(unique_name bats-alias-two)"
+    run aws_cmd iam create-account-alias --account-alias "$replacement"
+    assert_success
+    ACCOUNT_ALIAS="$replacement"
+
+    run aws_cmd iam list-account-aliases
+    assert_success
+    alias=$(json_get "$output" '.AccountAliases[0]')
+    [ "$alias" = "$replacement" ]
+}
+
+@test "IAM: re-creating the alias the account already holds fails" {
+    ACCOUNT_ALIAS="$(unique_name bats-alias)"
+    aws_cmd iam create-account-alias --account-alias "$ACCOUNT_ALIAS" >/dev/null
+
+    run aws_cmd iam create-account-alias --account-alias "$ACCOUNT_ALIAS"
     assert_failure
     assert_output --partial "EntityAlreadyExists"
 }
 
 @test "IAM: deleting a mismatched account alias fails" {
-    ACCOUNT_ALIAS="bats-alias-$(date +%s)-$$"
+    ACCOUNT_ALIAS="$(unique_name bats-alias)"
     aws_cmd iam create-account-alias --account-alias "$ACCOUNT_ALIAS" >/dev/null
 
     run aws_cmd iam delete-account-alias --account-alias "bats-alias-not-set-$$"
@@ -128,7 +144,7 @@ teardown() {
 }
 
 @test "IAM: delete account alias" {
-    ACCOUNT_ALIAS="bats-alias-$(date +%s)-$$"
+    ACCOUNT_ALIAS="$(unique_name bats-alias)"
     aws_cmd iam create-account-alias --account-alias "$ACCOUNT_ALIAS" >/dev/null
 
     run aws_cmd iam delete-account-alias --account-alias "$ACCOUNT_ALIAS"

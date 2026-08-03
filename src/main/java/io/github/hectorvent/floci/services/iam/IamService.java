@@ -194,9 +194,15 @@ public class IamService implements SessionAccountLookup {
             return;
         }
         validateAccountAlias(seededAccountAlias);
-        if (accountAliases.get(ACCOUNT_ALIAS_KEY).isEmpty()) {
+        Optional<String> stored = accountAliases.get(ACCOUNT_ALIAS_KEY);
+        if (stored.isEmpty()) {
             accountAliases.put(ACCOUNT_ALIAS_KEY, seededAccountAlias);
             LOG.infov("Seeded IAM account alias: {0}", seededAccountAlias);
+        } else if (!stored.get().equals(seededAccountAlias)) {
+            // Under persistent storage the alias outlives the process, so a changed configuration
+            // value is ignored on later starts. Say so rather than leaving it to be puzzled out.
+            LOG.debugv("Configured IAM account alias {0} ignored; {1} is already stored",
+                    seededAccountAlias, stored.get());
         }
     }
 
@@ -1034,22 +1040,23 @@ public class IamService implements SessionAccountLookup {
     }
 
     /**
-     * An AWS account holds at most one alias, so creating a second one is rejected rather than
-     * silently replacing the first. AWS reports both "this account already has an alias" and
-     * "some other account took that alias" as {@code EntityAlreadyExists}; aliases are global on
-     * real AWS but local here, so only the former case can arise.
+     * An account holds one alias, and AWS enforces that by replacement rather than rejection:
+     * creating a free alias while another is set silently swaps it. {@code EntityAlreadyExists}
+     * means the requested name is taken — globally on AWS, since aliases are unique across all
+     * accounts. Only the "you already hold this one" case can arise here, because the store is
+     * namespaced per account and holds no other account's aliases.
      */
     public void createAccountAlias(String alias) {
         validateAccountAlias(alias);
         synchronized (accountAliasLock) {
             Optional<String> existing = accountAliases.get(ACCOUNT_ALIAS_KEY);
-            if (existing.isPresent()) {
+            if (existing.isPresent() && existing.get().equals(alias)) {
                 throw new AwsException("EntityAlreadyExists",
-                        "The account alias " + existing.get() + " already exists.", 409);
+                        "The account alias " + alias + " already exists.", 409);
             }
             accountAliases.put(ACCOUNT_ALIAS_KEY, alias);
         }
-        LOG.infov("Created IAM account alias: {0}", alias);
+        LOG.infov("Set IAM account alias: {0}", alias);
     }
 
     /**
@@ -1057,6 +1064,9 @@ public class IamService implements SessionAccountLookup {
      * value in a delete call cannot silently clear the current alias.
      */
     public void deleteAccountAlias(String alias) {
+        // AWS applies the same pattern constraint to delete as to create, so a malformed value is
+        // a ValidationError rather than a miss.
+        validateAccountAlias(alias);
         synchronized (accountAliasLock) {
             String existing = accountAliases.get(ACCOUNT_ALIAS_KEY)
                     .orElseThrow(() -> new AwsException("NoSuchEntity",

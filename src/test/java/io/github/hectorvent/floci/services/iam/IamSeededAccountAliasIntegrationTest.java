@@ -44,15 +44,47 @@ class IamSeededAccountAliasIntegrationTest {
     }
 
     @Test
-    void creatingAnAliasOverTheSeededOneIsRejected() {
+    void recreatingTheSeededAliasIsRejected() {
         given()
             .formParam("Action", "CreateAccountAlias")
-            .formParam("AccountAlias", "another-alias")
+            .formParam("AccountAlias", SEEDED_ALIAS)
             .header("Authorization", IAM_CREDENTIAL)
         .when()
             .post("/")
         .then()
             .statusCode(409)
             .body("ErrorResponse.Error.Code", equalTo("EntityAlreadyExists"));
+    }
+
+    /** A seeded alias is ordinary state, so a later create replaces it like any other. */
+    @Test
+    void creatingAnotherAliasReplacesTheSeededOne() {
+        given()
+            .formParam("Action", "CreateAccountAlias")
+            .formParam("AccountAlias", "replacement-alias")
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "ListAccountAliases")
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListAccountAliasesResponse.ListAccountAliasesResult.AccountAliases.member",
+                    equalTo("replacement-alias"));
+
+        given()
+            .formParam("Action", "CreateAccountAlias")
+            .formParam("AccountAlias", SEEDED_ALIAS)
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 }

@@ -248,13 +248,13 @@ class IamConcurrencyTest {
     }
 
     /**
-     * An account holds exactly one alias, so concurrent creates of *different* aliases must leave
-     * exactly one winner: every loser has to see EntityAlreadyExists rather than a silent success
-     * over someone else's value. Unsynchronized, several callers pass the emptiness check together
-     * and the last write wins while all of them are told they succeeded.
+     * Creating a free alias replaces whatever is set, so concurrent creates of different aliases
+     * all succeed and the last write wins — that is AWS behaviour, not a race to be prevented.
+     * What must hold is that the store ends on exactly one of the requested values rather than a
+     * torn or absent one.
      */
     @Test
-    void concurrentAccountAliasCreatesLeaveExactlyOneWinner() throws Exception {
+    void concurrentAccountAliasCreatesLeaveOneRequestedValue() throws Exception {
         ExecutorService pool = Executors.newFixedThreadPool(THREADS);
         try {
             for (int trial = 0; trial < TRIALS; trial++) {
@@ -286,9 +286,10 @@ class IamConcurrencyTest {
                 assertTrue(done.await(30, TimeUnit.SECONDS), "alias workers stalled");
 
                 String stored = iam.getAccountAlias().orElse(null);
-                if (winners.size() != 1 || !winners.get(0).equals(stored) || !unexpected.isEmpty()) {
-                    fail("accountAlias trial " + trial + ": winners=" + winners + " stored=" + stored
-                            + " unexpectedErrors=" + unexpected);
+                if (winners.size() != N || stored == null || !winners.contains(stored)
+                        || !unexpected.isEmpty()) {
+                    fail("accountAlias trial " + trial + ": winners=" + winners.size() + "/" + N
+                            + " stored=" + stored + " unexpectedErrors=" + unexpected);
                 }
             }
         } finally {

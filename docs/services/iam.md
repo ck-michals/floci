@@ -135,13 +135,23 @@
 | CreateAccountAlias | Sets the account alias. An account can hold only one. |
 | DeleteAccountAlias | Removes the account alias. |
 
-An account holds at most one alias. `CreateAccountAlias` on an account that already has one
-returns `EntityAlreadyExists`, and `DeleteAccountAlias` must name the current alias — a mismatch
-returns `NoSuchEntity`. Aliases are 3–63 characters of lowercase letters, digits and hyphens, and
-may not start or end with a hyphen.
+An account holds one alias, and AWS enforces that by replacement rather than rejection:
+`CreateAccountAlias` with a new value silently swaps the current one. `EntityAlreadyExists` means
+the requested name is taken — on AWS that includes names held by other accounts, since aliases are
+globally unique, but the store here is per-account so only "you already hold this one" arises.
+
+`DeleteAccountAlias` must name the current alias; a mismatch returns `NoSuchEntity`. Both verbs
+apply the same pattern constraint, so a malformed value returns `ValidationError` on either.
+Aliases are 3–63 characters of lowercase letters, digits and hyphens, and may not start or end
+with a hyphen.
 
 Set `FLOCI_SERVICES_IAM_ACCOUNT_ALIAS` to seed an alias at startup, for callers that expect to
-read one without creating it first.
+read one without creating it first. It seeds the **default account** only, so a caller signing
+with a credential that resolves to a different account still reads an empty list. Seeding is
+skipped when an alias is already stored, so under `storage.mode: persistent` a changed value has
+no effect on later starts — the skip is logged at debug with both values. `/_floci/state/reset`
+clears the alias without re-seeding it, as it does the optional deployer principal; the seed
+returns on restart.
 
 ### Login Profiles
 

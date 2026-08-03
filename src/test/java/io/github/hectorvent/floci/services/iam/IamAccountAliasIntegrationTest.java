@@ -10,7 +10,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.isEmptyOrNullString;
 
 /**
  * Integration tests for IAM account aliases via the Query Protocol, covering the full HTTP stack
@@ -75,7 +76,7 @@ class IamAccountAliasIntegrationTest {
 
     @Test
     @Order(4)
-    void createSecondAliasIsRejected() {
+    void creatingAnotherAliasReplacesTheCurrentOne() {
         given()
             .formParam("Action", "CreateAccountAlias")
             .formParam("AccountAlias", "another-alias")
@@ -83,8 +84,55 @@ class IamAccountAliasIntegrationTest {
         .when()
             .post("/")
         .then()
+            .statusCode(200);
+
+        given()
+            .formParam("Action", "ListAccountAliases")
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListAccountAliasesResponse.ListAccountAliasesResult.AccountAliases.member",
+                    equalTo("another-alias"));
+
+        // Restore the alias the later ordered cases expect.
+        given()
+            .formParam("Action", "CreateAccountAlias")
+            .formParam("AccountAlias", ALIAS)
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(4)
+    void recreatingTheHeldAliasIsRejected() {
+        given()
+            .formParam("Action", "CreateAccountAlias")
+            .formParam("AccountAlias", ALIAS)
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
             .statusCode(409)
             .body("ErrorResponse.Error.Code", equalTo("EntityAlreadyExists"));
+    }
+
+    @Test
+    @Order(5)
+    void deleteWithAMalformedAliasIsRejected() {
+        given()
+            .formParam("Action", "DeleteAccountAlias")
+            .formParam("AccountAlias", "Bad_Alias")
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
     }
 
     @Test
