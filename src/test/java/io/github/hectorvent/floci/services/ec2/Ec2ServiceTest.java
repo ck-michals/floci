@@ -600,6 +600,41 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void createManagedPrefixListAcceptsIpv6Entries() {
+        Ec2Service service = prefixListService();
+
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp-v6", "IPv6", 5,
+                List.of(new PrefixListEntry("2001:db8::/32", "lab")), List.of());
+
+        assertEquals("IPv6", list.getAddressFamily());
+        assertEquals("2001:db8::/32", list.currentEntries().getFirst().getCidr());
+
+        service.modifyManagedPrefixList("us-east-1", list.getPrefixListId(), null, null, null,
+                List.of(new PrefixListEntry("2001:db8:1::/48", null)), List.of());
+        assertEquals(2, service.getManagedPrefixListEntries("us-east-1", list.getPrefixListId(), null).size());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.modifyManagedPrefixList(
+                "us-east-1", list.getPrefixListId(), null, null, null,
+                List.of(new PrefixListEntry("10.0.0.0/8", null)), List.of()));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    @Test
+    void managedPrefixListLookupsRejectAMissingId() {
+        Ec2Service service = prefixListService();
+
+        for (String missing : new String[] {null, "  "}) {
+            assertEquals("MissingParameter", assertThrows(AwsException.class, () ->
+                    service.getManagedPrefixListEntries("us-east-1", missing, null)).getErrorCode());
+            assertEquals("MissingParameter", assertThrows(AwsException.class, () ->
+                    service.deleteManagedPrefixList("us-east-1", missing)).getErrorCode());
+            assertEquals("MissingParameter", assertThrows(AwsException.class, () ->
+                    service.modifyManagedPrefixList("us-east-1", missing, null, null, null,
+                            List.of(), List.of())).getErrorCode());
+        }
+    }
+
+    @Test
     void describeManagedPrefixListsFiltersByName() {
         Ec2Service service = prefixListService();
         service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5, List.of(), List.of());
@@ -746,6 +781,11 @@ class Ec2ServiceTest {
 
         assertEquals(1, service.describeManagedPrefixLists("us-east-1", List.of(),
                 Map.of("tag:env", List.of("prod"))).size());
+
+        assertEquals("prefix-list", service.describeTags("us-east-1",
+                Map.of("resource-id", List.of(created.getPrefixListId()))).getFirst().get("resourceType"));
+        assertEquals(1, service.describeTags("us-east-1",
+                Map.of("resource-type", List.of("prefix-list"))).size());
 
         service.deleteTags("us-east-1", List.of(created.getPrefixListId()), List.of(new Tag("env", null)));
         assertTrue(service.describeManagedPrefixLists("us-east-1", List.of(created.getPrefixListId()), Map.of())

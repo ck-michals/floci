@@ -735,6 +735,10 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     private ManagedPrefixList getRequiredManagedPrefixList(String region, String prefixListId) {
+        if (prefixListId == null || prefixListId.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter PrefixListId.", 400);
+        }
         return describeManagedPrefixLists(region, List.of(prefixListId), Map.of()).stream()
                 .findFirst()
                 .orElseThrow(() -> new AwsException("InvalidPrefixListID.NotFound",
@@ -2480,6 +2484,7 @@ public class Ec2Service implements ContainerTeardown {
         if (resourceId.startsWith("lt-")) return "launch-template";
         if (resourceId.startsWith("vpce-")) return "vpc-endpoint";
         if (resourceId.startsWith("nat-")) return "natgateway";
+        if (resourceId.startsWith("pl-")) return "prefix-list";
         return "unknown";
     }
 
