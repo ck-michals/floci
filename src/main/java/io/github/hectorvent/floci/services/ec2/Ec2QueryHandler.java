@@ -1084,10 +1084,12 @@ public class Ec2QueryHandler {
     }
 
     // Malformed numerics must surface as a client error, not escape the handler as an
-    // unchecked NumberFormatException and turn into a 500.
+    // unchecked NumberFormatException and turn into a 500. Only an absent parameter is null: a
+    // present but blank value is malformed input, and treating it as absent would quietly drop
+    // the conditional-version check on ModifyManagedPrefixList.
     private Integer intOrNull(MultivaluedMap<String, String> p, String name) {
         String value = p.getFirst(name);
-        if (value == null || value.isBlank()) {
+        if (value == null) {
             return null;
         }
         try {
@@ -1100,7 +1102,7 @@ public class Ec2QueryHandler {
 
     private Long longOrNull(MultivaluedMap<String, String> p, String name) {
         String value = p.getFirst(name);
-        if (value == null || value.isBlank()) {
+        if (value == null) {
             return null;
         }
         try {

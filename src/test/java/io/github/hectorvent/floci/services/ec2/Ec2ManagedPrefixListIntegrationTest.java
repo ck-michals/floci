@@ -235,6 +235,37 @@ class Ec2ManagedPrefixListIntegrationTest {
             .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
     }
 
+    /**
+     * A blank value is present-but-malformed, not absent. Treating it as absent would drop the
+     * conditional-version check and let a modification through that CurrentVersion asked to gate.
+     */
+    @Test
+    @Order(11)
+    void blankNumericParametersReturnAClientError() {
+        given()
+            .formParam("Action", "ModifyManagedPrefixList")
+            .formParam("PrefixListId", prefixListId)
+            .formParam("CurrentVersion", "   ")
+            .formParam("AddEntry.1.Cidr", "172.16.0.0/12")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+
+        given()
+            .formParam("Action", "GetManagedPrefixListEntries")
+            .formParam("PrefixListId", prefixListId)
+            .formParam("TargetVersion", "")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
     @Test
     @Order(12)
     void deleteManagedPrefixList() {
