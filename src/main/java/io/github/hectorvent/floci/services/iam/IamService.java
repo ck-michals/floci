@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
+import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
@@ -52,6 +53,11 @@ public class IamService implements SessionAccountLookup {
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
+    private static final int MAX_OIDC_CLIENT_IDS = 100;
+    private static final int MAX_OIDC_THUMBPRINTS = 5;
+
+    /** Guards the read-modify-write in the OIDC provider mutators. */
+    private final Object oidcProviderLock = new Object();
 
     private final StorageBackend<String, IamUser> users;
     private final StorageBackend<String, IamGroup> groups;
@@ -60,6 +66,7 @@ public class IamService implements SessionAccountLookup {
     private final StorageBackend<String, AccessKey> accessKeys;
     private final StorageBackend<String, InstanceProfile> instanceProfiles;
     private final StorageBackend<String, SessionCredential> sessions;
+    private final StorageBackend<String, OpenIDConnectProvider> oidcProviders;
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
 
@@ -80,6 +87,7 @@ public class IamService implements SessionAccountLookup {
             storageFactory.create("iam", "iam-access-keys.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-instance-profiles.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-sessions.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-oidc-providers.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal()
         );
@@ -92,8 +100,10 @@ public class IamService implements SessionAccountLookup {
                StorageBackend<String, AccessKey> accessKeys,
                StorageBackend<String, InstanceProfile> instanceProfiles,
                StorageBackend<String, SessionCredential> sessions,
+               StorageBackend<String, OpenIDConnectProvider> oidcProviders,
                RegionResolver regionResolver) {
-        this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions, regionResolver, false);
+        this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions, oidcProviders,
+                regionResolver, false);
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -103,6 +113,7 @@ public class IamService implements SessionAccountLookup {
                StorageBackend<String, AccessKey> accessKeys,
                StorageBackend<String, InstanceProfile> instanceProfiles,
                StorageBackend<String, SessionCredential> sessions,
+               StorageBackend<String, OpenIDConnectProvider> oidcProviders,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal) {
         this.users = users;
@@ -112,6 +123,7 @@ public class IamService implements SessionAccountLookup {
         this.accessKeys = accessKeys;
         this.instanceProfiles = instanceProfiles;
         this.sessions = sessions;
+        this.oidcProviders = oidcProviders;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
     }
@@ -973,6 +985,160 @@ public class IamService implements SessionAccountLookup {
         return instanceProfiles.scan(k -> true).stream()
                 .filter(p -> p.getRoleNames().contains(roleName))
                 .toList();
+    }
+
+    // =========================================================================
+    // OIDC Identity Providers
+    // =========================================================================
+
+    /**
+     * AWS identifies a provider by URL, so the ARN is derived from it rather than from a random
+     * id, and the scheme is stripped: {@code https://host/path} becomes
+     * {@code arn:aws:iam::<account>:oidc-provider/host/path}. Creating the same URL twice is
+     * therefore a duplicate resource, not a second provider.
+     */
+    public OpenIDConnectProvider createOpenIDConnectProvider(String url, List<String> clientIdList,
+                                                             List<String> thumbprintList,
+                                                             Map<String, String> providerTags) {
+        if (url == null || url.isBlank()) {
+            throw new AwsException("ValidationError", "The request must contain the parameter Url.", 400);
+        }
+        if (!url.startsWith("https://")) {
+            throw new AwsException("ValidationError",
+                    "The OpenID Connect provider URL must begin with https://.", 400);
+        }
+        String normalizedUrl = url.substring("https://".length());
+        if (normalizedUrl.isBlank()) {
+            throw new AwsException("ValidationError", "The OpenID Connect provider URL is not valid.", 400);
+        }
+        if (thumbprintList != null && thumbprintList.size() > MAX_OIDC_THUMBPRINTS) {
+            throw new AwsException("LimitExceeded",
+                    "An OpenID Connect provider can have at most " + MAX_OIDC_THUMBPRINTS + " thumbprints.", 409);
+        }
+        if (clientIdList != null && clientIdList.size() > MAX_OIDC_CLIENT_IDS) {
+            throw new AwsException("LimitExceeded",
+                    "An OpenID Connect provider can have at most " + MAX_OIDC_CLIENT_IDS + " client IDs.", 409);
+        }
+
+        String arn = iamArn("oidc-provider", "/", normalizedUrl);
+        OpenIDConnectProvider provider = new OpenIDConnectProvider();
+        provider.setArn(arn);
+        provider.setUrl(normalizedUrl);
+        provider.setClientIdList(clientIdList == null ? new ArrayList<>() : new ArrayList<>(clientIdList));
+        provider.setThumbprintList(thumbprintList == null ? new ArrayList<>() : new ArrayList<>(thumbprintList));
+        provider.setCreateDate(Instant.now());
+        if (providerTags != null && !providerTags.isEmpty()) {
+            provider.setTags(providerTags);
+        }
+        // Racing creates collide only on the same URL, but they can carry different client IDs,
+        // thumbprints and tags, so an unguarded check-then-write would report success to every
+        // caller while storing one arbitrary payload.
+        synchronized (oidcProviderLock) {
+            if (oidcProviders.get(arn).isPresent()) {
+                throw new AwsException("EntityAlreadyExists",
+                        "Provider with url " + normalizedUrl + " already exists.", 409);
+            }
+            oidcProviders.put(arn, provider);
+        }
+        LOG.infov("Created OIDC provider: {0}", arn);
+        return provider;
+    }
+
+    public OpenIDConnectProvider getOpenIDConnectProvider(String arn) {
+        if (arn == null || arn.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter OpenIDConnectProviderArn.", 400);
+        }
+        return oidcProviders.get(arn)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "OpenIDConnect Provider not found for arn " + arn, 404));
+    }
+
+    public List<OpenIDConnectProvider> listOpenIDConnectProviders() {
+        return oidcProviders.scan(k -> true);
+    }
+
+    public void deleteOpenIDConnectProvider(String arn) {
+        synchronized (oidcProviderLock) {
+            getOpenIDConnectProvider(arn);
+            oidcProviders.delete(arn);
+        }
+        LOG.infov("Deleted OIDC provider: {0}", arn);
+    }
+
+    public void addClientIdToOpenIDConnectProvider(String arn, String clientId) {
+        if (clientId == null || clientId.isBlank()) {
+            throw new AwsException("ValidationError", "The request must contain the parameter ClientID.", 400);
+        }
+        synchronized (oidcProviderLock) {
+            OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
+            if (provider.getClientIdList().contains(clientId)) {
+                throw new AwsException("EntityAlreadyExists",
+                        "The client ID " + clientId + " already exists for provider " + arn + ".", 409);
+            }
+            if (provider.getClientIdList().size() >= MAX_OIDC_CLIENT_IDS) {
+                throw new AwsException("LimitExceeded",
+                        "An OpenID Connect provider can have at most " + MAX_OIDC_CLIENT_IDS + " client IDs.", 409);
+            }
+            List<String> updated = new ArrayList<>(provider.getClientIdList());
+            updated.add(clientId);
+            provider.setClientIdList(updated);
+            oidcProviders.put(arn, provider);
+        }
+    }
+
+    public void removeClientIdFromOpenIDConnectProvider(String arn, String clientId) {
+        synchronized (oidcProviderLock) {
+            OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
+            if (!provider.getClientIdList().contains(clientId)) {
+                throw new AwsException("NoSuchEntity",
+                        "The client ID " + clientId + " does not exist for provider " + arn + ".", 404);
+            }
+            List<String> updated = new ArrayList<>(provider.getClientIdList());
+            updated.remove(clientId);
+            provider.setClientIdList(updated);
+            oidcProviders.put(arn, provider);
+        }
+    }
+
+    public void updateOpenIDConnectProviderThumbprint(String arn, List<String> thumbprintList) {
+        if (thumbprintList == null || thumbprintList.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "The request must contain the parameter ThumbprintList.", 400);
+        }
+        if (thumbprintList.size() > MAX_OIDC_THUMBPRINTS) {
+            throw new AwsException("LimitExceeded",
+                    "An OpenID Connect provider can have at most " + MAX_OIDC_THUMBPRINTS + " thumbprints.", 409);
+        }
+        synchronized (oidcProviderLock) {
+            OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
+            provider.setThumbprintList(new ArrayList<>(thumbprintList));
+            oidcProviders.put(arn, provider);
+        }
+    }
+
+    public void tagOpenIDConnectProvider(String arn, Map<String, String> newTags) {
+        synchronized (oidcProviderLock) {
+            OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
+            Map<String, String> merged = new LinkedHashMap<>(provider.getTags());
+            merged.putAll(newTags);
+            provider.setTags(merged);
+            oidcProviders.put(arn, provider);
+        }
+    }
+
+    public void untagOpenIDConnectProvider(String arn, List<String> tagKeys) {
+        synchronized (oidcProviderLock) {
+            OpenIDConnectProvider provider = getOpenIDConnectProvider(arn);
+            Map<String, String> remaining = new LinkedHashMap<>(provider.getTags());
+            tagKeys.forEach(remaining::remove);
+            provider.setTags(remaining);
+            oidcProviders.put(arn, provider);
+        }
+    }
+
+    public Map<String, String> listOpenIDConnectProviderTags(String arn) {
+        return getOpenIDConnectProvider(arn).getTags();
     }
 
     // =========================================================================

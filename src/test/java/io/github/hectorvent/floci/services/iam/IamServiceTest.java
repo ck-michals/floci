@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
@@ -49,6 +50,7 @@ class IamServiceTest {
                 accessKeys,
                 new InMemoryStorage<>(),
                 sessions,
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"),
                 seedDeployerPrincipal
         );
@@ -787,5 +789,128 @@ class IamServiceTest {
 
         List<IamPolicy> all = iamService.listPolicies(null, "/");
         assertEquals(awsOnly.size() + localOnly.size(), all.size());
+    }
+
+    // =========================================================================
+    // OIDC Identity Providers
+    // =========================================================================
+
+    private static final String OIDC_URL =
+            "https://oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B716D3041E";
+    private static final String OIDC_HOST =
+            "oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B716D3041E";
+    private static final String THUMBPRINT = "9e99a48a9960b14926bb7f3b02e22da2b0ab7280";
+
+    @Test
+    void createOpenIDConnectProviderStripsTheSchemeFromUrlAndArn() {
+        OpenIDConnectProvider provider = iamService.createOpenIDConnectProvider(
+                OIDC_URL, List.of("sts.amazonaws.com"), List.of(THUMBPRINT), Map.of());
+
+        assertEquals(OIDC_HOST, provider.getUrl());
+        assertEquals("arn:aws:iam::000000000000:oidc-provider/" + OIDC_HOST, provider.getArn());
+        assertEquals(List.of("sts.amazonaws.com"), provider.getClientIdList());
+        assertEquals(List.of(THUMBPRINT), provider.getThumbprintList());
+        assertNotNull(provider.getCreateDate());
+    }
+
+    @Test
+    void createOpenIDConnectProviderRequiresHttps() {
+        AwsException error = assertThrows(AwsException.class, () -> iamService.createOpenIDConnectProvider(
+                "http://oidc.example.com/id/1", List.of(), List.of(), Map.of()));
+        assertEquals("ValidationError", error.getErrorCode());
+    }
+
+    @Test
+    void createDuplicateOpenIDConnectProviderFails() {
+        iamService.createOpenIDConnectProvider(OIDC_URL, List.of(), List.of(THUMBPRINT), Map.of());
+
+        AwsException error = assertThrows(AwsException.class, () -> iamService.createOpenIDConnectProvider(
+                OIDC_URL, List.of(), List.of(THUMBPRINT), Map.of()));
+        assertEquals("EntityAlreadyExists", error.getErrorCode());
+    }
+
+    @Test
+    void getOpenIDConnectProviderNotFoundThrows() {
+        AwsException error = assertThrows(AwsException.class, () -> iamService.getOpenIDConnectProvider(
+                "arn:aws:iam::000000000000:oidc-provider/missing.example.com"));
+        assertEquals("NoSuchEntity", error.getErrorCode());
+    }
+
+    @Test
+    void listOpenIDConnectProviders() {
+        assertTrue(iamService.listOpenIDConnectProviders().isEmpty());
+        OpenIDConnectProvider provider =
+                iamService.createOpenIDConnectProvider(OIDC_URL, List.of(), List.of(THUMBPRINT), Map.of());
+
+        List<OpenIDConnectProvider> all = iamService.listOpenIDConnectProviders();
+        assertEquals(1, all.size());
+        assertEquals(provider.getArn(), all.getFirst().getArn());
+    }
+
+    @Test
+    void deleteOpenIDConnectProvider() {
+        OpenIDConnectProvider provider =
+                iamService.createOpenIDConnectProvider(OIDC_URL, List.of(), List.of(THUMBPRINT), Map.of());
+
+        iamService.deleteOpenIDConnectProvider(provider.getArn());
+
+        assertTrue(iamService.listOpenIDConnectProviders().isEmpty());
+        assertThrows(AwsException.class, () -> iamService.getOpenIDConnectProvider(provider.getArn()));
+    }
+
+    @Test
+    void addAndRemoveClientId() {
+        OpenIDConnectProvider provider = iamService.createOpenIDConnectProvider(
+                OIDC_URL, List.of("sts.amazonaws.com"), List.of(THUMBPRINT), Map.of());
+
+        iamService.addClientIdToOpenIDConnectProvider(provider.getArn(), "extra.audience");
+        assertEquals(List.of("sts.amazonaws.com", "extra.audience"),
+                iamService.getOpenIDConnectProvider(provider.getArn()).getClientIdList());
+
+        AwsException duplicate = assertThrows(AwsException.class, () ->
+                iamService.addClientIdToOpenIDConnectProvider(provider.getArn(), "extra.audience"));
+        assertEquals("EntityAlreadyExists", duplicate.getErrorCode());
+
+        iamService.removeClientIdFromOpenIDConnectProvider(provider.getArn(), "extra.audience");
+        assertEquals(List.of("sts.amazonaws.com"),
+                iamService.getOpenIDConnectProvider(provider.getArn()).getClientIdList());
+
+        AwsException missing = assertThrows(AwsException.class, () ->
+                iamService.removeClientIdFromOpenIDConnectProvider(provider.getArn(), "never.added"));
+        assertEquals("NoSuchEntity", missing.getErrorCode());
+    }
+
+    @Test
+    void updateThumbprintReplacesTheList() {
+        OpenIDConnectProvider provider =
+                iamService.createOpenIDConnectProvider(OIDC_URL, List.of(), List.of(THUMBPRINT), Map.of());
+
+        iamService.updateOpenIDConnectProviderThumbprint(provider.getArn(), List.of("aaaa", "bbbb"));
+
+        assertEquals(List.of("aaaa", "bbbb"),
+                iamService.getOpenIDConnectProvider(provider.getArn()).getThumbprintList());
+    }
+
+    @Test
+    void thumbprintListIsCappedAtFive() {
+        AwsException error = assertThrows(AwsException.class, () -> iamService.createOpenIDConnectProvider(
+                OIDC_URL, List.of(), List.of("a", "b", "c", "d", "e", "f"), Map.of()));
+        assertEquals("LimitExceeded", error.getErrorCode());
+    }
+
+    @Test
+    void tagAndUntagOpenIDConnectProvider() {
+        OpenIDConnectProvider provider = iamService.createOpenIDConnectProvider(
+                OIDC_URL, List.of(), List.of(THUMBPRINT), Map.of("env", "prod"));
+
+        assertEquals("prod", iamService.listOpenIDConnectProviderTags(provider.getArn()).get("env"));
+
+        iamService.tagOpenIDConnectProvider(provider.getArn(), Map.of("team", "platform"));
+        assertEquals(2, iamService.listOpenIDConnectProviderTags(provider.getArn()).size());
+
+        iamService.untagOpenIDConnectProvider(provider.getArn(), List.of("env"));
+        Map<String, String> remaining = iamService.listOpenIDConnectProviderTags(provider.getArn());
+        assertEquals(1, remaining.size());
+        assertEquals("platform", remaining.get("team"));
     }
 }

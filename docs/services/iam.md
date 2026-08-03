@@ -127,6 +127,31 @@
 | UpdateAccessKey | Updates an access key's status. |
 | DeleteAccessKey | Deletes an access key from a user. |
 
+### OIDC Identity Providers
+
+| Action | Description |
+|--------|-------------|
+| CreateOpenIDConnectProvider | Creates an OIDC identity provider from an https URL. |
+| GetOpenIDConnectProvider | Returns a provider's URL, client IDs, thumbprints and tags. |
+| ListOpenIDConnectProviders | Lists the ARNs of stored OIDC providers. |
+| DeleteOpenIDConnectProvider | Deletes an OIDC identity provider. |
+| AddClientIDToOpenIDConnectProvider | Adds a client ID (audience) to a provider. |
+| RemoveClientIDFromOpenIDConnectProvider | Removes a client ID from a provider. |
+| UpdateOpenIDConnectProviderThumbprint | Replaces a provider's thumbprint list. |
+| TagOpenIDConnectProvider | Adds tags to a provider. |
+| UntagOpenIDConnectProvider | Removes tags from a provider. |
+| ListOpenIDConnectProviderTags | Lists tags stored for a provider. |
+
+A provider is identified by its URL, so the ARN is derived from it rather than from a generated
+id: `https://oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLE` becomes
+`arn:aws:iam::<account>:oidc-provider/oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLE`. Creating
+the same URL twice returns `EntityAlreadyExists`. As on AWS, `GetOpenIDConnectProvider` reports
+the URL **without** its scheme.
+
+The URL must begin with `https://`. A provider holds at most 100 client IDs and 5 thumbprints.
+Thumbprints are stored and echoed back but never validated against the remote endpoint, since
+nothing here performs the TLS handshake they describe.
+
 ### Login Profiles
 
 | Action | Description |
