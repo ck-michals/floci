@@ -127,6 +127,22 @@
 | UpdateAccessKey | Updates an access key's status. |
 | DeleteAccessKey | Deletes an access key from a user. |
 
+### Account Aliases
+
+| Action | Description |
+|--------|-------------|
+| ListAccountAliases | Lists the alias set for the account, or an empty list when none is set. |
+| CreateAccountAlias | Sets the account alias. An account can hold only one. |
+| DeleteAccountAlias | Removes the account alias. |
+
+An account holds at most one alias. `CreateAccountAlias` on an account that already has one
+returns `EntityAlreadyExists`, and `DeleteAccountAlias` must name the current alias — a mismatch
+returns `NoSuchEntity`. Aliases are 3–63 characters of lowercase letters, digits and hyphens, and
+may not start or end with a hyphen.
+
+Set `FLOCI_SERVICES_IAM_ACCOUNT_ALIAS` to seed an alias at startup, for callers that expect to
+read one without creating it first.
+
 ### Login Profiles
 
 | Action | Description |
@@ -273,6 +289,7 @@ AWS_ACCESS_KEY_ID=$AKID AWS_SECRET_ACCESS_KEY=$SECRET \
 | `FLOCI_SERVICES_IAM_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` | `false` | Enforce IAM policies on all inbound requests |
 | `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` | `false` | Seed the optional `floci-deployer` user and `floci` / `floci` access key |
+| `FLOCI_SERVICES_IAM_ACCOUNT_ALIAS` | _(unset)_ | Seed an account alias at startup; unset means the account has no alias |
 
 ## Examples
 

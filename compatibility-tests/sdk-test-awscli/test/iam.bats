@@ -5,6 +5,7 @@ setup() {
     load 'test_helper/common-setup'
     ROLE_NAME="bats-test-role-$(unique_name)"
     POLICY_ARN=""
+    ACCOUNT_ALIAS=""
 }
 
 teardown() {
@@ -13,6 +14,10 @@ teardown() {
         aws_cmd iam delete-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1 || true
     fi
     aws_cmd iam delete-role --role-name "$ROLE_NAME" >/dev/null 2>&1 || true
+    # An account holds one alias, so a leaked one would fail every later create.
+    if [ -n "$ACCOUNT_ALIAS" ]; then
+        aws_cmd iam delete-account-alias --account-alias "$ACCOUNT_ALIAS" >/dev/null 2>&1 || true
+    fi
 }
 
 @test "IAM: create role" {
@@ -83,4 +88,60 @@ teardown() {
 
     run aws_cmd iam delete-role --role-name "$ROLE_NAME"
     assert_success
+}
+
+@test "IAM: list account aliases is empty by default" {
+    run aws_cmd iam list-account-aliases
+    assert_success
+    count=$(json_get "$output" '.AccountAliases | length')
+    [ "$count" = "0" ]
+}
+
+@test "IAM: create and list account alias" {
+    ACCOUNT_ALIAS="bats-alias-$(date +%s)-$$"
+
+    run aws_cmd iam create-account-alias --account-alias "$ACCOUNT_ALIAS"
+    assert_success
+
+    run aws_cmd iam list-account-aliases
+    assert_success
+    alias=$(json_get "$output" '.AccountAliases[0]')
+    [ "$alias" = "$ACCOUNT_ALIAS" ]
+}
+
+@test "IAM: creating a second account alias fails" {
+    ACCOUNT_ALIAS="bats-alias-$(date +%s)-$$"
+    aws_cmd iam create-account-alias --account-alias "$ACCOUNT_ALIAS" >/dev/null
+
+    run aws_cmd iam create-account-alias --account-alias "bats-alias-second-$$"
+    assert_failure
+    assert_output --partial "EntityAlreadyExists"
+}
+
+@test "IAM: deleting a mismatched account alias fails" {
+    ACCOUNT_ALIAS="bats-alias-$(date +%s)-$$"
+    aws_cmd iam create-account-alias --account-alias "$ACCOUNT_ALIAS" >/dev/null
+
+    run aws_cmd iam delete-account-alias --account-alias "bats-alias-not-set-$$"
+    assert_failure
+    assert_output --partial "NoSuchEntity"
+}
+
+@test "IAM: delete account alias" {
+    local alias_name="bats-alias-$(date +%s)-$$"
+    aws_cmd iam create-account-alias --account-alias "$alias_name" >/dev/null
+
+    run aws_cmd iam delete-account-alias --account-alias "$alias_name"
+    assert_success
+
+    run aws_cmd iam list-account-aliases
+    assert_success
+    count=$(json_get "$output" '.AccountAliases | length')
+    [ "$count" = "0" ]
+}
+
+@test "IAM: malformed account alias is rejected" {
+    run aws_cmd iam create-account-alias --account-alias "Upper-Case"
+    assert_failure
+    assert_output --partial "ValidationError"
 }

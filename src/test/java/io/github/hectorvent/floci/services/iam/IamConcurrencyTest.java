@@ -37,7 +37,8 @@ class IamConcurrencyTest {
         return new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new RegionResolver("eu-central-1", "000000000000"), false);
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("eu-central-1", "000000000000"), false);
     }
 
     /** Sets up one entity on the given service and returns the i-th concurrent mutation. */
