@@ -289,7 +289,7 @@ Entries are versioned. A prefix list starts at version 1, and each `ModifyManage
 that adds or removes entries stores a new version and bumps the counter, so
 `GetManagedPrefixListEntries` can serve an earlier `TargetVersion`. Renaming the list or
 changing `MaxEntries` does not create a version. Passing `CurrentVersion` makes the
-modification conditional: a stale value returns `IncorrectState`. Removals are applied before
+modification conditional: a stale value returns `PrefixListVersionMismatch`. Removals are applied before
 additions, so one call can replace an entry's description by removing and re-adding the CIDR.
 
 Creation is synchronous: a new list is returned as `create-complete` rather than passing

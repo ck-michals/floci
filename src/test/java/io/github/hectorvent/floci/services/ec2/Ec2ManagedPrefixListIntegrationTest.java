@@ -159,7 +159,7 @@ class Ec2ManagedPrefixListIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("Response.Errors.Error.Code", equalTo("IncorrectState"));
+            .body("Response.Errors.Error.Code", equalTo("PrefixListVersionMismatch"));
     }
 
     @Test

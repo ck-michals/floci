@@ -709,7 +709,7 @@ class Ec2ServiceTest {
         AwsException error = assertThrows(AwsException.class, () ->
                 service.modifyManagedPrefixList("us-east-1", created.getPrefixListId(), 1L, null, null,
                         List.of(new PrefixListEntry("172.16.0.0/12", null)), List.of()));
-        assertEquals("IncorrectState", error.getErrorCode());
+        assertEquals("PrefixListVersionMismatch", error.getErrorCode());
     }
 
     @Test

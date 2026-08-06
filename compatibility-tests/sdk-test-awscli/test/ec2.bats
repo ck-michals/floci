@@ -101,7 +101,7 @@ create_prefix_list() {
         --current-version 1 \
         --add-entries 'Cidr=172.16.0.0/12'
     assert_failure
-    assert_output --partial "IncorrectState"
+    assert_output --partial "PrefixListVersionMismatch"
 }
 
 @test "EC2: AWS-managed prefix list cannot be modified" {

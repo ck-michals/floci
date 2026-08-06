@@ -676,9 +676,8 @@ public class Ec2Service implements ContainerTeardown {
             ManagedPrefixList list = getRequiredManagedPrefixList(region, prefixListId);
             requireCustomerManaged(list, "modified");
             if (currentVersion != null && currentVersion != list.getVersion()) {
-                throw new AwsException("IncorrectState",
-                        "The prefix list " + prefixListId + " is at version " + list.getVersion()
-                                + ", not " + currentVersion + ".", 400);
+                throw new AwsException("PrefixListVersionMismatch",
+                        "The prefix list has the incorrect version number.", 400);
             }
 
             List<PrefixListEntry> updated = new ArrayList<>(list.currentEntries());
