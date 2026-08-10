@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeControll
 import io.github.hectorvent.floci.services.cognito.CognitoOAuthController;
 import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
 import io.github.hectorvent.floci.services.eks.EksController;
+import io.github.hectorvent.floci.services.mwaa.MwaaController;
 import io.github.hectorvent.floci.services.iot.IotController;
 import io.github.hectorvent.floci.services.iot.IotDataController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
@@ -177,6 +178,11 @@ public class ResolvedServiceCatalog {
                         "kinesis", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("Kinesis_20131202."), Set.of("kinesis"), Set.of(), Set.of()),
+                descriptor("kinesisanalytics", "kinesisanalytics",
+                        config.services().kinesisAnalytics().enabled(), true,
+                        "kinesisanalytics", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("KinesisAnalytics_20180523."), Set.of("kinesisanalytics"), Set.of(), Set.of()),
                 descriptor("kms", "kms", config.services().kms().enabled(), true,
                         "kms", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -264,6 +270,17 @@ public class ResolvedServiceCatalog {
                         "eks", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("eks"), Set.of(), Set.of(EksController.class)),
+                descriptor("mwaa", "mwaa", config.services().mwaa().enabled(), true,
+                        "mwaa", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(),
+                        // Register both the signing name and the endpoint id. botocore's service
+                        // model declares signingName=airflow for mwaa (endpointPrefix=airflow too);
+                        // register the "mwaa" config/external key as well as a safety net, same
+                        // double-registration technique as bedrock-runtime/bedrock above.
+                        Set.of("airflow", "mwaa"),
+                        Set.of(),
+                        Set.of(MwaaController.class)),
                 descriptor("pipes", "pipes", config.services().pipes().enabled(), true,
                         "pipes", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
@@ -318,6 +335,12 @@ public class ResolvedServiceCatalog {
                         "autoscaling", config.storage().mode(), 5000L, AwsNamespaces.AUTOSCALING, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("autoscaling"), Set.of(), Set.of()),
+                descriptor("application-autoscaling", "applicationautoscaling",
+                        config.services().applicationautoscaling().enabled(), true,
+                        "applicationautoscaling", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AnyScaleFrontendService."), Set.of("application-autoscaling"),
+                        Set.of(), Set.of()),
                 descriptor("elasticbeanstalk", "elasticbeanstalk",
                         config.services().elasticbeanstalk().enabled(), true,
                         "elasticbeanstalk",

@@ -50,7 +50,6 @@ class IamServiceTest {
                 accessKeys,
                 new InMemoryStorage<>(),
                 sessions,
-                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"),
                 seedDeployerPrincipal
         );
@@ -205,6 +204,43 @@ class IamServiceTest {
         assertEquals("arn:aws:iam::000000000000:role/LambdaExec", role.getArn());
         assertEquals(trustPolicy, role.getAssumeRolePolicyDocument());
         assertEquals("Lambda role", role.getDescription());
+    }
+
+    @Test
+    void updateAssumeRolePolicyWithMatchingExpectedIdApplies() {
+        IamRole role = iamService.createRole("LambdaExec", "/", "{}", null, 3600, null);
+        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+
+        iamService.updateAssumeRolePolicy("LambdaExec", newDoc, role.getRoleId());
+
+        assertEquals(newDoc, iamService.getRole("LambdaExec").getAssumeRolePolicyDocument());
+    }
+
+    @Test
+    void updateAssumeRolePolicyWithNullExpectedIdSkipsCheck() {
+        iamService.createRole("LambdaExec", "/", "{}", null, 3600, null);
+        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+
+        iamService.updateAssumeRolePolicy("LambdaExec", newDoc, null);
+
+        assertEquals(newDoc, iamService.getRole("LambdaExec").getAssumeRolePolicyDocument());
+    }
+
+    @Test
+    void updateAssumeRolePolicyRejectsMismatchedExpectedId() {
+        // github.com/floci-io/floci/issues/2084 (Greptile follow-up) — if the role named here was
+        // deleted and recreated under the same name since the caller last verified its identity,
+        // the recreated role has a different RoleId. The update must be refused rather than
+        // silently applied to a role the caller never actually verified owning.
+        IamRole role = iamService.createRole("LambdaExec", "/", "{}", null, 3600, null);
+        String originalDoc = role.getAssumeRolePolicyDocument();
+        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.updateAssumeRolePolicy("LambdaExec", newDoc, "AROAWRONGID"));
+        assertEquals("EntityAlreadyExists", ex.getErrorCode());
+        assertEquals(originalDoc, iamService.getRole("LambdaExec").getAssumeRolePolicyDocument(),
+                "rejected update must not have changed the role's trust policy");
     }
 
     @Test
@@ -592,6 +628,17 @@ class IamServiceTest {
         assertTrue(admin.getPolicyId().startsWith("ANPA"));
         assertEquals("v1", admin.getDefaultVersionId());
 
+        // Referenced by the roles `cdk bootstrap` and the aws-bench scenario stacks create.
+        // A missing entry surfaces as "Policy <arn> does not exist" on the consuming role,
+        // which rolls the whole stack back.
+        for (String name : new String[] {
+                "AWSCloudFormationReadOnlyAccess", "AmazonAthenaFullAccess",
+                "AmazonRedshiftFullAccess", "AmazonS3TablesReadOnlyAccess" }) {
+            IamPolicy seeded = iamService.getPolicy("arn:aws:iam::aws:policy/" + name);
+            assertEquals(name, seeded.getPolicyName());
+            assertEquals("/", seeded.getPath());
+        }
+
         IamPolicy lambda = iamService.getPolicy(
                 "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole");
         assertEquals("AWSLambdaBasicExecutionRole", lambda.getPolicyName());
@@ -613,6 +660,27 @@ class IamServiceTest {
                 "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole");
         assertEquals("AmazonRDSEnhancedMonitoringRole", rdsMonitoring.getPolicyName());
         assertEquals("/service-role/", rdsMonitoring.getPath());
+
+        IamPolicy bedrock = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonBedrockFullAccess");
+        assertEquals("AmazonBedrockFullAccess", bedrock.getPolicyName());
+        assertEquals("/", bedrock.getPath());
+
+        IamPolicy bedrockReadOnly = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonBedrockReadOnly");
+        assertEquals("AmazonBedrockReadOnly", bedrockReadOnly.getPolicyName());
+        assertEquals("/", bedrockReadOnly.getPath());
+    }
+
+    @Test
+    void attachAmazonBedrockFullAccessToRole() {
+        // Regression: AmazonBedrockFullAccess was absent from the seed catalog, so
+        // AttachRolePolicy (the Terraform path — CloudFormation attaches inline and
+        // never calls it) 404'd with NoSuchEntity. Attaching it must now succeed.
+        iamService.createRole("BedrockRole", "/", "{}", null, 0, null);
+        iamService.attachRolePolicy("BedrockRole", "arn:aws:iam::aws:policy/AmazonBedrockFullAccess");
+
+        List<String> attached = iamService.listAttachedRolePolicies("BedrockRole", null).stream()
+                .map(IamPolicy::getArn).toList();
+        assertTrue(attached.contains("arn:aws:iam::aws:policy/AmazonBedrockFullAccess"));
     }
 
     @Test
