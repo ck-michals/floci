@@ -85,6 +85,7 @@ nav:
     - Cognito: services/cognito.md
     - KMS: services/kms.md
     - Kinesis: services/kinesis.md
+    - Managed Service for Apache Flink: services/kinesisanalytics.md
     - Secrets Manager: services/secrets-manager.md
     - CloudFormation: services/cloudformation.md
     - Step Functions: services/step-functions.md
@@ -110,6 +111,7 @@ nav:
     - ECR: services/ecr.md
     - Resource Groups Tagging API: services/resource-groups-tagging.md
     - EKS: services/eks.md
+    - MWAA: services/mwaa.md
     - OpenSearch: services/opensearch.md
     - EC2: services/ec2.md
     - Lightsail: services/lightsail.md

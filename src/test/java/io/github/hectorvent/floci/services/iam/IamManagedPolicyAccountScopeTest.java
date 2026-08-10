@@ -61,7 +61,6 @@ class IamManagedPolicyAccountScopeTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 policies,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", DEFAULT_ACCT));
 
         // A managed policy resolves from any account context (served from the global catalog,
@@ -99,7 +98,6 @@ class IamManagedPolicyAccountScopeTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 policies,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", DEFAULT_ACCT));
 
         int catalogSize = AwsManagedPolicies.POLICIES.size();
@@ -141,7 +139,6 @@ class IamManagedPolicyAccountScopeTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 reqPolicies,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", DEFAULT_ACCT));
 
         // Scope=Local returns only the caller's customer policy — never AWS-managed policies.
@@ -157,7 +154,6 @@ class IamManagedPolicyAccountScopeTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 defPolicies,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", DEFAULT_ACCT));
         List<IamPolicy> defAll = defService.listPolicies("All", null);
         assertEquals(AwsManagedPolicies.POLICIES.size(), defAll.size());
@@ -194,7 +190,6 @@ class IamManagedPolicyAccountScopeTest {
                 users, new InMemoryStorage<>(), new InMemoryStorage<>(),
                 policies,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", DEFAULT_ACCT));
 
         // ListAttachedUserPolicies returns both the managed (catalog) and customer (scoped) policies.
@@ -216,7 +211,6 @@ class IamManagedPolicyAccountScopeTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new AccountAwareStorageBackend<>(rawPolicies, otherCtx, DEFAULT_ACCT),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", DEFAULT_ACCT));
         // The user does not exist under account 222..., so the customer policy never leaks; assert
         // the catalog policy still resolves directly regardless of account.
@@ -254,7 +248,6 @@ class IamManagedPolicyAccountScopeTest {
                 new InMemoryStorage<>(), groups, new InMemoryStorage<>(),
                 policies,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", DEFAULT_ACCT));
 
         // ListAttachedGroupPolicies returns both the managed (catalog) and customer (scoped) policies.
@@ -285,7 +278,6 @@ class IamManagedPolicyAccountScopeTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), roles,
                 policies,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", DEFAULT_ACCT));
 
         // ListAttachedRolePolicies resolves the managed policy from the catalog for account 111...
