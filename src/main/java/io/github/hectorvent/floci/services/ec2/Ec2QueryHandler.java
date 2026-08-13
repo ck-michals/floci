@@ -340,6 +340,12 @@ public class Ec2QueryHandler {
                 String desc = p.getFirst(prefix + "." + i + ".IpRanges." + j + ".Description");
                 perm.getIpRanges().add(new IpRange(cidr, desc));
             }
+            for (int j = 1; ; j++) {
+                String prefixListId = p.getFirst(prefix + "." + i + ".PrefixListIds." + j + ".PrefixListId");
+                if (prefixListId == null) break;
+                String desc = p.getFirst(prefix + "." + i + ".PrefixListIds." + j + ".Description");
+                perm.getPrefixListIds().add(new PrefixListId(prefixListId, desc));
+            }
             perms.add(perm);
         }
         return perms;
@@ -2393,6 +2399,7 @@ public class Ec2QueryHandler {
         if (rule.getToPort() != null) xml.elem("toPort", String.valueOf(rule.getToPort()));
         xml.elem("cidrIpv4", rule.getCidrIpv4())
                 .elem("cidrIpv6", rule.getCidrIpv6())
+                .elem("prefixListId", rule.getPrefixListId())
                 .elem("description", rule.getDescription())
                 .raw(tagSetXml(rule.getTags()));
         return xml.build();
@@ -2878,7 +2885,14 @@ public class Ec2QueryHandler {
                         .elem("groupName", g.getGroupName())
                         .end("item");
             }
-            xml.end("groups").end("item");
+            xml.end("groups").start("prefixListIds");
+            for (PrefixListId prefixList : perm.getPrefixListIds()) {
+                xml.start("item")
+                        .elem("prefixListId", prefixList.getPrefixListId())
+                        .elem("description", prefixList.getDescription())
+                        .end("item");
+            }
+            xml.end("prefixListIds").end("item");
         }
         xml.end(wrapperTag);
         return xml.build();

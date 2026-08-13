@@ -57,6 +57,7 @@ import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAclAssociation;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
 import io.github.hectorvent.floci.services.ec2.model.PrefixList;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
@@ -1670,34 +1671,50 @@ public class Ec2Service implements ContainerTeardown {
     private List<SecurityGroupRule> createRules(String region, String groupId, IpPermission perm, boolean egress) {
         List<SecurityGroupRule> rules = new ArrayList<>();
         List<IpRange> ranges = perm.getIpRanges();
-        if (ranges == null || ranges.isEmpty()) {
-            SecurityGroupRule rule = new SecurityGroupRule();
-            rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
-            rule.setGroupId(groupId);
-            rule.setGroupOwnerId(accountId);
-            rule.setEgress(egress);
-            rule.setIpProtocol(perm.getIpProtocol());
-            rule.setFromPort(perm.getFromPort());
-            rule.setToPort(perm.getToPort());
-            securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
-            rules.add(rule);
-        } else {
+        List<PrefixListId> prefixLists = perm.getPrefixListIds();
+
+        // AWS emits one rule per source, so a permission naming both CIDRs and prefix lists
+        // expands to one rule for each; a permission naming neither still yields one bare rule.
+        if ((ranges == null || ranges.isEmpty()) && (prefixLists == null || prefixLists.isEmpty())) {
+            rules.add(storeRule(region, newRule(groupId, egress, perm)));
+        }
+        if (ranges != null) {
             for (IpRange range : ranges) {
-                SecurityGroupRule rule = new SecurityGroupRule();
-                rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
-                rule.setGroupId(groupId);
-                rule.setGroupOwnerId(accountId);
-                rule.setEgress(egress);
-                rule.setIpProtocol(perm.getIpProtocol());
-                rule.setFromPort(perm.getFromPort());
-                rule.setToPort(perm.getToPort());
+                SecurityGroupRule rule = newRule(groupId, egress, perm);
                 rule.setCidrIpv4(range.getCidrIp());
                 rule.setDescription(range.getDescription());
-                securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
-                rules.add(rule);
+                rules.add(storeRule(region, rule));
+            }
+        }
+        if (prefixLists != null) {
+            for (PrefixListId prefixList : prefixLists) {
+                // Reject an unknown list before the rule exists, the way AWS does, so a typo
+                // cannot leave a rule pointing at nothing.
+                getRequiredManagedPrefixList(region, prefixList.getPrefixListId());
+                SecurityGroupRule rule = newRule(groupId, egress, perm);
+                rule.setPrefixListId(prefixList.getPrefixListId());
+                rule.setDescription(prefixList.getDescription());
+                rules.add(storeRule(region, rule));
             }
         }
         return rules;
+    }
+
+    private SecurityGroupRule newRule(String groupId, boolean egress, IpPermission perm) {
+        SecurityGroupRule rule = new SecurityGroupRule();
+        rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
+        rule.setGroupId(groupId);
+        rule.setGroupOwnerId(accountId);
+        rule.setEgress(egress);
+        rule.setIpProtocol(perm.getIpProtocol());
+        rule.setFromPort(perm.getFromPort());
+        rule.setToPort(perm.getToPort());
+        return rule;
+    }
+
+    private SecurityGroupRule storeRule(String region, SecurityGroupRule rule) {
+        securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
+        return rule;
     }
 
     public void revokeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
