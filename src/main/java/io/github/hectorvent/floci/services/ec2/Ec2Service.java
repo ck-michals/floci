@@ -1672,8 +1672,11 @@ public class Ec2Service implements ContainerTeardown {
         return rules;
     }
 
+    // Deliberately does not validate: authorize resolves every prefix list a request names before
+    // the first write. Re-checking per permission would reopen the partial-write window, since a
+    // list can be deleted between the two checks — the group lock and the prefix list lock are
+    // different monitors. The other callers pass a CIDR-only default egress permission.
     private List<SecurityGroupRule> createRules(String region, String groupId, IpPermission perm, boolean egress) {
-        requireKnownPrefixLists(region, List.of(perm));
         List<SecurityGroupRule> rules = new ArrayList<>();
         List<IpRange> ranges = perm.getIpRanges();
         List<PrefixListId> prefixLists = perm.getPrefixListIds();
