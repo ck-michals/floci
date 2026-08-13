@@ -342,7 +342,9 @@ public class Ec2QueryHandler {
             }
             for (int j = 1; ; j++) {
                 String prefixListId = p.getFirst(prefix + "." + i + ".PrefixListIds." + j + ".PrefixListId");
-                if (prefixListId == null) break;
+                if (prefixListId == null) {
+                    break;
+                }
                 String desc = p.getFirst(prefix + "." + i + ".PrefixListIds." + j + ".Description");
                 perm.getPrefixListIds().add(new PrefixListId(prefixListId, desc));
             }

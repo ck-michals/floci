@@ -1640,6 +1640,7 @@ public class Ec2Service implements ContainerTeardown {
         List<SecurityGroupRule> rules = new ArrayList<>();
         synchronized (lockFor(key(region, groupId))) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            requireKnownPrefixLists(region, permissions);
             List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
             for (IpPermission perm : permissions) {
                 next.add(perm);
@@ -1657,6 +1658,7 @@ public class Ec2Service implements ContainerTeardown {
         List<SecurityGroupRule> rules = new ArrayList<>();
         synchronized (lockFor(key(region, groupId))) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            requireKnownPrefixLists(region, permissions);
             List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
             for (IpPermission perm : permissions) {
                 next.add(perm);
@@ -1669,6 +1671,7 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     private List<SecurityGroupRule> createRules(String region, String groupId, IpPermission perm, boolean egress) {
+        requireKnownPrefixLists(region, List.of(perm));
         List<SecurityGroupRule> rules = new ArrayList<>();
         List<IpRange> ranges = perm.getIpRanges();
         List<PrefixListId> prefixLists = perm.getPrefixListIds();
@@ -1688,9 +1691,6 @@ public class Ec2Service implements ContainerTeardown {
         }
         if (prefixLists != null) {
             for (PrefixListId prefixList : prefixLists) {
-                // Reject an unknown list before the rule exists, the way AWS does, so a typo
-                // cannot leave a rule pointing at nothing.
-                getRequiredManagedPrefixList(region, prefixList.getPrefixListId());
                 SecurityGroupRule rule = newRule(groupId, egress, perm);
                 rule.setPrefixListId(prefixList.getPrefixListId());
                 rule.setDescription(prefixList.getDescription());
@@ -1698,6 +1698,21 @@ public class Ec2Service implements ContainerTeardown {
             }
         }
         return rules;
+    }
+
+    /**
+     * Resolves every prefix list a request names before anything is written. AWS rejects the whole
+     * call, so a permission carrying a valid CIDR alongside an unknown list must persist neither.
+     */
+    private void requireKnownPrefixLists(String region, List<IpPermission> permissions) {
+        for (IpPermission perm : permissions) {
+            if (perm.getPrefixListIds() == null) {
+                continue;
+            }
+            for (PrefixListId prefixList : perm.getPrefixListIds()) {
+                getRequiredManagedPrefixList(region, prefixList.getPrefixListId());
+            }
+        }
     }
 
     private SecurityGroupRule newRule(String groupId, boolean egress, IpPermission perm) {

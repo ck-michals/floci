@@ -959,6 +959,43 @@ class Ec2ServiceTest {
         assertEquals(1, rules.stream().filter(r -> list.getPrefixListId().equals(r.getPrefixListId())).count());
     }
 
+    /**
+     * Verified against a live AWS account: a permission naming a valid CIDR alongside an unknown
+     * prefix list persists neither, so the whole call has to resolve before anything is written.
+     */
+    @Test
+    void anUnknownPrefixListLeavesNoPartialRuleFromTheSamePermission() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission perm = tcpPermission(5432);
+        perm.getIpRanges().add(new IpRange("10.9.0.0/16", "direct"));
+        perm.getPrefixListIds().add(new PrefixListId("pl-doesnotexist", null));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(perm)));
+        assertEquals("InvalidPrefixListID.NotFound", error.getErrorCode());
+        assertTrue(service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of()).stream()
+                .noneMatch(r -> !r.isEgress()), "the CIDR rule must not survive the rejection");
+    }
+
+    /** A later bad permission must not leave an earlier good one applied either. */
+    @Test
+    void anUnknownPrefixListInASecondPermissionLeavesTheFirstUnapplied() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission good = tcpPermission(443);
+        good.getIpRanges().add(new IpRange("10.1.0.0/16", null));
+        IpPermission bad = tcpPermission(5432);
+        bad.getPrefixListIds().add(new PrefixListId("pl-doesnotexist", null));
+
+        assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(good, bad)));
+        assertTrue(service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of()).stream()
+                .noneMatch(r -> !r.isEgress()), "no ingress rule from either permission");
+    }
+
     @Test
     void anEgressRuleCanAlsoComeFromAPrefixList() {
         Ec2Service service = prefixListService();
