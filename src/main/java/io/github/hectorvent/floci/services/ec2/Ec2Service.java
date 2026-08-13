@@ -2484,6 +2484,7 @@ public class Ec2Service implements ContainerTeardown {
         if (resourceId.startsWith("i-")) return "instance";
         if (resourceId.startsWith("vpc-")) return "vpc";
         if (resourceId.startsWith("subnet-")) return "subnet";
+        if (resourceId.startsWith("sgr-")) return "security-group-rule";
         if (resourceId.startsWith("sg-")) return "security-group";
         if (resourceId.startsWith("igw-")) return "internet-gateway";
         if (resourceId.startsWith("rtb-")) return "route-table";

@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
+import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
@@ -885,6 +887,34 @@ class Ec2ServiceTest {
         service.deleteTags("us-east-1", List.of(created.getPrefixListId()), List.of(new Tag("env", null)));
         assertTrue(service.describeManagedPrefixLists("us-east-1", List.of(created.getPrefixListId()), Map.of())
                 .getFirst().getTags().isEmpty());
+    }
+
+    /**
+     * A rule's tags already reach the store and the rule itself; only DescribeTags mistyped them,
+     * so a resource-type filter never matched.
+     */
+    @Test
+    void tagsOnASecurityGroupRuleAreTypedAsSecurityGroupRule() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+        IpPermission perm = new IpPermission();
+        perm.setIpProtocol("tcp");
+        perm.setFromPort(443);
+        perm.setToPort(443);
+        perm.getIpRanges().add(new IpRange("10.0.0.0/8", null));
+        String ruleId = service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(perm))
+                .getFirst().getSecurityGroupRuleId();
+
+        service.createTags("us-east-1", List.of(ruleId), List.of(new Tag("env", "prod")));
+
+        assertEquals("security-group-rule", service.describeTags("us-east-1",
+                Map.of("resource-id", List.of(ruleId))).getFirst().get("resourceType"));
+        assertEquals(1, service.describeTags("us-east-1",
+                Map.of("resource-type", List.of("security-group-rule"))).size());
+        // The group itself must keep its own type.
+        assertEquals("security-group", service.describeTags("us-east-1",
+                Map.of("resource-id", List.of(groupId))).stream()
+                .findFirst().map(t -> t.get("resourceType")).orElse("security-group"));
     }
 
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
