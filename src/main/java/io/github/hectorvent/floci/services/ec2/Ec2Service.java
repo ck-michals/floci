@@ -2481,19 +2481,45 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     private String inferResourceType(String resourceId) {
-        if (resourceId.startsWith("i-")) return "instance";
-        if (resourceId.startsWith("vpc-")) return "vpc";
-        if (resourceId.startsWith("subnet-")) return "subnet";
-        if (resourceId.startsWith("sgr-")) return "security-group-rule";
-        if (resourceId.startsWith("sg-")) return "security-group";
-        if (resourceId.startsWith("igw-")) return "internet-gateway";
-        if (resourceId.startsWith("rtb-")) return "route-table";
-        if (resourceId.startsWith("key-")) return "key-pair";
-        if (resourceId.startsWith("eipalloc-")) return "elastic-ip";
-        if (resourceId.startsWith("lt-")) return "launch-template";
-        if (resourceId.startsWith("vpce-")) return "vpc-endpoint";
-        if (resourceId.startsWith("nat-")) return "natgateway";
-        if (resourceId.startsWith("pl-")) return "prefix-list";
+        if (resourceId.startsWith("i-")) {
+            return "instance";
+        }
+        if (resourceId.startsWith("vpc-")) {
+            return "vpc";
+        }
+        if (resourceId.startsWith("subnet-")) {
+            return "subnet";
+        }
+        if (resourceId.startsWith("sgr-")) {
+            return "security-group-rule";
+        }
+        if (resourceId.startsWith("sg-")) {
+            return "security-group";
+        }
+        if (resourceId.startsWith("igw-")) {
+            return "internet-gateway";
+        }
+        if (resourceId.startsWith("rtb-")) {
+            return "route-table";
+        }
+        if (resourceId.startsWith("key-")) {
+            return "key-pair";
+        }
+        if (resourceId.startsWith("eipalloc-")) {
+            return "elastic-ip";
+        }
+        if (resourceId.startsWith("lt-")) {
+            return "launch-template";
+        }
+        if (resourceId.startsWith("vpce-")) {
+            return "vpc-endpoint";
+        }
+        if (resourceId.startsWith("nat-")) {
+            return "natgateway";
+        }
+        if (resourceId.startsWith("pl-")) {
+            return "prefix-list";
+        }
         return "unknown";
     }
 

@@ -911,10 +911,14 @@ class Ec2ServiceTest {
                 Map.of("resource-id", List.of(ruleId))).getFirst().get("resourceType"));
         assertEquals(1, service.describeTags("us-east-1",
                 Map.of("resource-type", List.of("security-group-rule"))).size());
-        // The group itself must keep its own type.
+
+        // Tag the group as well, so the sg- classification is genuinely exercised rather than
+        // read off an empty result.
+        service.createTags("us-east-1", List.of(groupId), List.of(new Tag("env", "prod")));
         assertEquals("security-group", service.describeTags("us-east-1",
-                Map.of("resource-id", List.of(groupId))).stream()
-                .findFirst().map(t -> t.get("resourceType")).orElse("security-group"));
+                Map.of("resource-id", List.of(groupId))).getFirst().get("resourceType"));
+        assertEquals(1, service.describeTags("us-east-1",
+                Map.of("resource-type", List.of("security-group"))).size());
     }
 
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
