@@ -326,17 +326,27 @@ public class Ec2QueryHandler {
         List<IpPermission> perms = new ArrayList<>();
         for (int i = 1; ; i++) {
             String proto = p.getFirst(prefix + "." + i + ".IpProtocol");
-            if (proto == null) break;
+            if (proto == null) {
+                break;
+            }
             IpPermission perm = new IpPermission();
             perm.setIpProtocol(proto);
             String fromPort = p.getFirst(prefix + "." + i + ".FromPort");
             String toPort = p.getFirst(prefix + "." + i + ".ToPort");
-            if (fromPort != null) perm.setFromPort(Integer.parseInt(fromPort));
-            if (toPort != null) perm.setToPort(Integer.parseInt(toPort));
+            if (fromPort != null) {
+                perm.setFromPort(Integer.parseInt(fromPort));
+            }
+            if (toPort != null) {
+                perm.setToPort(Integer.parseInt(toPort));
+            }
             for (int j = 1; ; j++) {
                 String cidr = p.getFirst(prefix + "." + i + ".IpRanges." + j + ".CidrIp");
-                if (cidr == null) cidr = p.getFirst(prefix + "." + i + ".IpRanges." + j);
-                if (cidr == null) break;
+                if (cidr == null) {
+                    cidr = p.getFirst(prefix + "." + i + ".IpRanges." + j);
+                }
+                if (cidr == null) {
+                    break;
+                }
                 String desc = p.getFirst(prefix + "." + i + ".IpRanges." + j + ".Description");
                 perm.getIpRanges().add(new IpRange(cidr, desc));
             }
