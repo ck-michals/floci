@@ -996,6 +996,31 @@ class Ec2ServiceTest {
                 .noneMatch(r -> !r.isEgress()), "no ingress rule from either permission");
     }
 
+    /**
+     * Verified against a live AWS account: revoking the prefix list source leaves a CIDR
+     * permission on the same protocol and ports untouched.
+     */
+    @Test
+    void revokingAPrefixListSourceLeavesACidrOnTheSameTupleAlone() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
+                List.of(), List.of());
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission viaCidr = tcpPermission(5432);
+        viaCidr.getIpRanges().add(new IpRange("192.168.0.0/16", null));
+        IpPermission viaList = tcpPermission(5432);
+        viaList.getPrefixListIds().add(new PrefixListId(list.getPrefixListId(), null));
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(viaCidr, viaList));
+
+        service.revokeSecurityGroupIngress("us-east-1", groupId, List.of(viaList));
+
+        List<IpPermission> left = service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
+                .getFirst().getIpPermissions();
+        assertEquals(1, left.size(), "only the prefix list permission should have been revoked");
+        assertEquals("192.168.0.0/16", left.getFirst().getIpRanges().getFirst().getCidrIp());
+    }
+
     @Test
     void anEgressRuleCanAlsoComeFromAPrefixList() {
         Ec2Service service = prefixListService();

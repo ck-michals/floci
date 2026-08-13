@@ -48,6 +48,8 @@ import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.InternetGatewayAttachment;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
+import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
@@ -1736,8 +1738,7 @@ public class Ec2Service implements ContainerTeardown {
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, groupId))) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-            List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
-            next.removeIf(p -> matchesAnyPermission(p, permissions));
+            List<IpPermission> next = revokeSources(new ArrayList<>(sg.getIpPermissions()), permissions);
             sg.setIpPermissions(next);
             securityGroups.put(key(region, groupId), sg);
         }
@@ -1748,8 +1749,7 @@ public class Ec2Service implements ContainerTeardown {
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, groupId))) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-            List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
-            next.removeIf(p -> matchesAnyPermission(p, permissions));
+            List<IpPermission> next = revokeSources(new ArrayList<>(sg.getIpPermissionsEgress()), permissions);
             sg.setIpPermissionsEgress(next);
             securityGroups.put(key(region, groupId), sg);
         }
@@ -1763,15 +1763,58 @@ public class Ec2Service implements ContainerTeardown {
         return sg;
     }
 
-    private boolean matchesAnyPermission(IpPermission existing, List<IpPermission> toRemove) {
-        for (IpPermission perm : toRemove) {
-            if (Objects.equals(existing.getIpProtocol(), perm.getIpProtocol())
-                    && Objects.equals(existing.getFromPort(), perm.getFromPort())
-                    && Objects.equals(existing.getToPort(), perm.getToPort())) {
-                return true;
+    /**
+     * Revocation is scoped to the sources it names, as on AWS: revoking one source leaves other
+     * permissions sharing the same protocol and ports in place, and a permission that names
+     * several sources loses only those revoked. A request naming no source at all still removes
+     * the whole matching permission, which is how a bare protocol/port revoke behaves.
+     *
+     * <p>Returns the permissions that remain.
+     */
+    private List<IpPermission> revokeSources(List<IpPermission> existing, List<IpPermission> toRemove) {
+        List<IpPermission> remaining = new ArrayList<>();
+        for (IpPermission perm : existing) {
+            boolean dropWholePermission = false;
+            boolean hadSources = hasSources(perm);
+            for (IpPermission removal : toRemove) {
+                if (!sameProtocolAndPorts(perm, removal)) {
+                    continue;
+                }
+                if (!hasSources(removal)) {
+                    dropWholePermission = true;
+                    break;
+                }
+                // authorize stores the caller's IpPermission object, so a revoke can name the very
+                // instance held on the group. Snapshot the values before mutating either list.
+                List<String> cidrs = removal.getIpRanges().stream().map(IpRange::getCidrIp).toList();
+                List<String> cidrsV6 = removal.getIpv6Ranges().stream().map(Ipv6Range::getCidrIpv6).toList();
+                List<String> lists = removal.getPrefixListIds().stream()
+                        .map(PrefixListId::getPrefixListId).toList();
+                List<String> groups = removal.getUserIdGroupPairs().stream()
+                        .map(UserIdGroupPair::getGroupId).toList();
+                perm.getIpRanges().removeIf(e -> cidrs.contains(e.getCidrIp()));
+                perm.getIpv6Ranges().removeIf(e -> cidrsV6.contains(e.getCidrIpv6()));
+                perm.getPrefixListIds().removeIf(e -> lists.contains(e.getPrefixListId()));
+                perm.getUserIdGroupPairs().removeIf(e -> groups.contains(e.getGroupId()));
+            }
+            // A permission that had sources and has lost them all is gone; one that never had any
+            // survives unless a sourceless revoke named it.
+            if (!dropWholePermission && (!hadSources || hasSources(perm))) {
+                remaining.add(perm);
             }
         }
-        return false;
+        return remaining;
+    }
+
+    private boolean sameProtocolAndPorts(IpPermission a, IpPermission b) {
+        return Objects.equals(a.getIpProtocol(), b.getIpProtocol())
+                && Objects.equals(a.getFromPort(), b.getFromPort())
+                && Objects.equals(a.getToPort(), b.getToPort());
+    }
+
+    private boolean hasSources(IpPermission perm) {
+        return !perm.getIpRanges().isEmpty() || !perm.getIpv6Ranges().isEmpty()
+                || !perm.getPrefixListIds().isEmpty() || !perm.getUserIdGroupPairs().isEmpty();
     }
 
     public List<SecurityGroupRule> describeSecurityGroupRules(String region, List<String> groupIds, List<String> ruleIds) {
