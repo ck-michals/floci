@@ -286,6 +286,11 @@ Two AWS-managed prefix lists exist in every region without being created —
 read-only, and served by both `DescribePrefixLists` and `DescribeManagedPrefixLists`;
 modifying or deleting one returns `UnsupportedOperation`.
 
+A customer-managed list may not take a name AWS reserves for its own: `com.amazonaws.`,
+`com.amazon.` or `com.aws.`, each including the trailing dot. `CreateManagedPrefixList`
+rejects those with `InvalidParameterValue`; a name that merely resembles one, such as
+`com.amazonaws-internal`, is allowed.
+
 Entries are versioned. A prefix list starts at version 1, and each `ModifyManagedPrefixList`
 that adds or removes entries stores a new version and bumps the counter, so
 `GetManagedPrefixListEntries` can serve an earlier `TargetVersion`. Renaming the list or

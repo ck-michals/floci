@@ -562,6 +562,13 @@ public class Ec2Service implements ContainerTeardown {
     // Managed prefix lists
     // =========================================================================
 
+    /**
+     * Name prefixes AWS reserves for its own gateway-endpoint lists. The trailing dot is part of
+     * each: {@code com.amazonaws-probe} is accepted on AWS, so matching without it over-rejects.
+     */
+    private static final List<String> RESERVED_PREFIX_LIST_NAME_PREFIXES =
+            List.of("com.amazonaws.", "com.amazon.", "com.aws.");
+
     private List<ManagedPrefixList> awsManagedPrefixLists(String region) {
         return List.of(
                 awsManagedPrefixList(region, "pl-63a5400a", "com.amazonaws." + region + ".s3",
@@ -594,6 +601,12 @@ public class Ec2Service implements ContainerTeardown {
                                                      List<Tag> prefixListTags) {
         if (prefixListName == null || prefixListName.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter PrefixListName.", 400);
+        }
+        for (String reserved : RESERVED_PREFIX_LIST_NAME_PREFIXES) {
+            if (prefixListName.startsWith(reserved)) {
+                throw new AwsException("InvalidParameterValue",
+                        "The prefix list name cannot begin with (com.amazonaws., com.amazon., com.aws.).", 400);
+            }
         }
         if (!"IPv4".equals(addressFamily) && !"IPv6".equals(addressFamily)) {
             throw new AwsException("InvalidParameterValue",

@@ -729,6 +729,28 @@ class Ec2ServiceTest {
         }
     }
 
+    /**
+     * Verified against a live AWS account: the three dotted prefixes are rejected, and the
+     * trailing dot matters — {@code com.amazonaws-probe} and {@code comamazonaws.probe} are both
+     * accepted there, so a dotless prefix match would refuse names AWS allows.
+     */
+    @Test
+    void createManagedPrefixListRejectsNamesReservedByAws() {
+        Ec2Service service = prefixListService();
+
+        for (String reserved : new String[] {"com.amazonaws.probe", "com.amazon.probe", "com.aws.probe"}) {
+            AwsException error = assertThrows(AwsException.class, () -> service.createManagedPrefixList(
+                    "us-east-1", reserved, "IPv4", 5, List.of(), List.of()), "expected rejection for " + reserved);
+            assertEquals("InvalidParameterValue", error.getErrorCode());
+        }
+
+        // Names that only look reserved are still allowed.
+        for (String allowed : new String[] {"com.amazonaws-probe", "comamazonaws.probe", "corp"}) {
+            assertEquals(allowed, service.createManagedPrefixList(
+                    "us-east-1", allowed, "IPv4", 5, List.of(), List.of()).getPrefixListName());
+        }
+    }
+
     @Test
     void describeManagedPrefixListsFiltersByName() {
         Ec2Service service = prefixListService();
