@@ -908,6 +908,9 @@ public interface EmulatorConfig {
         @WithDefault("mariadb:11")
         String defaultMariadbImage();
 
+        /** Hostname advertised for RDS endpoints. Uses published Docker ports when configured. */
+        Optional<String> endpointHost();
+
         /** Docker network to attach DB containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
     }
@@ -1315,6 +1318,12 @@ public interface EmulatorConfig {
 
         @WithDefault("cloudfront.net")
         String domainSuffix();
+
+        /**
+         * Exact custom-origin hostnames allowed to resolve to private or otherwise non-routable
+         * addresses. Empty by default to match CloudFront's public custom-origin boundary.
+         */
+        Optional<List<String>> allowedPrivateOriginHosts();
     }
 
     interface AppSyncServiceConfig {
