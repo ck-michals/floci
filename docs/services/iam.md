@@ -145,8 +145,10 @@ globally unique, but the store here is per-account so only "you already hold thi
 
 `DeleteAccountAlias` must name the current alias; a mismatch returns `NoSuchEntity`. Both verbs
 apply the same pattern constraint, so a malformed value returns `ValidationError` on either.
-Aliases are 3–63 characters of lowercase letters, digits and hyphens, and may not start or end
-with a hyphen.
+Aliases are 3–63 characters of lowercase letters, digits and hyphens, may not start or end with a
+hyphen, and may not contain two hyphens in a row — AWS's documented
+`^[a-z0-9]([a-z0-9]|-(?!-)){1,61}[a-z0-9]$`. The `ValidationError` message is reproduced from AWS
+verbatim and does not itself mention the consecutive-hyphen rule.
 
 Set `FLOCI_SERVICES_IAM_ACCOUNT_ALIAS` to seed an alias at startup, for callers that expect to
 read one without creating it first. It seeds the **default account** only, so a caller signing
@@ -155,6 +157,7 @@ skipped when an alias is already stored, so under `storage.mode: persistent` a c
 no effect on later starts — the skip is logged at debug with both values. `/_floci/state/reset`
 clears the alias without re-seeding it, as it does the optional deployer principal; the seed
 returns on restart.
+
 ### OIDC Identity Providers
 
 | Action | Description |
