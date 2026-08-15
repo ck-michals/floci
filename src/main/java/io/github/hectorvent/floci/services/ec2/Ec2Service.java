@@ -1018,6 +1018,7 @@ public class Ec2Service implements ContainerTeardown {
                 gateway.setDescription(description);
             }
             applyTransitGatewayOptionChanges(gateway.getOptions(), changes);
+            applyDefaultRouteTableChanges(region, gateway, changes);
             if (removeCidrBlocks != null && !removeCidrBlocks.isEmpty()) {
                 gateway.getOptions().getTransitGatewayCidrBlocks().removeIf(removeCidrBlocks::contains);
             }
@@ -1031,6 +1032,50 @@ public class Ec2Service implements ContainerTeardown {
             transitGateways.put(key(region, transitGatewayId), gateway);
             return gateway;
         }
+    }
+
+    /**
+     * Carries a default route table flag change through to the id it governs and to the table
+     * itself. Verified against a live account: disabling drops the id from the options entirely
+     * rather than blanking it, and clears that table's own default marker while leaving the table
+     * in place — the other default, if still enabled, keeps both its id and its marker.
+     */
+    private void applyDefaultRouteTableChanges(String region, TransitGateway gateway,
+                                               TransitGatewayOptions changes) {
+        if (changes == null) {
+            return;
+        }
+        TransitGatewayOptions options = gateway.getOptions();
+        if (changes.getDefaultRouteTableAssociation() != null) {
+            boolean enabling = "enable".equals(changes.getDefaultRouteTableAssociation());
+            String routeTableId = enabling
+                    ? changes.getAssociationDefaultRouteTableId()
+                    : options.getAssociationDefaultRouteTableId();
+            options.setAssociationDefaultRouteTableId(enabling ? routeTableId : null);
+            markDefaultRouteTable(region, routeTableId, true, enabling);
+        }
+        if (changes.getDefaultRouteTablePropagation() != null) {
+            boolean enabling = "enable".equals(changes.getDefaultRouteTablePropagation());
+            String routeTableId = enabling
+                    ? changes.getPropagationDefaultRouteTableId()
+                    : options.getPropagationDefaultRouteTableId();
+            options.setPropagationDefaultRouteTableId(enabling ? routeTableId : null);
+            markDefaultRouteTable(region, routeTableId, false, enabling);
+        }
+    }
+
+    private void markDefaultRouteTable(String region, String routeTableId, boolean association, boolean isDefault) {
+        if (routeTableId == null) {
+            return;
+        }
+        transitGatewayRouteTables.get(key(region, routeTableId)).ifPresent(routeTable -> {
+            if (association) {
+                routeTable.setDefaultAssociationRouteTable(isDefault);
+            } else {
+                routeTable.setDefaultPropagationRouteTable(isDefault);
+            }
+            transitGatewayRouteTables.put(key(region, routeTableId), routeTable);
+        });
     }
 
     /**

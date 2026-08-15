@@ -1477,6 +1477,39 @@ class Ec2ServiceTest {
         assertEquals(routeTableId, after.getAssociationDefaultRouteTableId());
     }
 
+    /**
+     * Verified against a live account: disabling one default drops its id from the options
+     * entirely and clears that marker on the route table, while the other default keeps both its
+     * id and its marker, and the table itself survives.
+     */
+    @Test
+    void disablingADefaultDropsItsIdAndClearsOnlyThatMarker() {
+        AccountAwareStorageBackend<TransitGatewayRouteTable> routeTables =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-transit-gateway-route-tables.json", routeTables)));
+        TransitGateway gateway = service.createTransitGateway("us-east-1", "hub", null, List.of());
+        String routeTableId = gateway.getOptions().getAssociationDefaultRouteTableId();
+
+        TransitGatewayOptions changes = new TransitGatewayOptions();
+        changes.setDefaultRouteTableAssociation("disable");
+        TransitGatewayOptions after = service.modifyTransitGateway("us-east-1",
+                gateway.getTransitGatewayId(), null, changes, List.of(), List.of()).getOptions();
+
+        assertEquals("disable", after.getDefaultRouteTableAssociation());
+        assertNull(after.getAssociationDefaultRouteTableId(), "the id goes with the flag");
+        assertEquals("enable", after.getDefaultRouteTablePropagation());
+        assertEquals(routeTableId, after.getPropagationDefaultRouteTableId(),
+                "the other default is untouched");
+
+        TransitGatewayRouteTable stored = routeTables.scan(k -> true).getFirst();
+        assertFalse(stored.isDefaultAssociationRouteTable(), "association marker cleared");
+        assertTrue(stored.isDefaultPropagationRouteTable(), "propagation marker kept");
+        assertEquals(routeTableId, stored.getTransitGatewayRouteTableId(), "the table itself survives");
+    }
+
     @Test
     void deleteTransitGatewayRemovesTheGatewayAndItsDefaultRouteTable() {
         AccountAwareStorageBackend<TransitGatewayRouteTable> routeTables =
