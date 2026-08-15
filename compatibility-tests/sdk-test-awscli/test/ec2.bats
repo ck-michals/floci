@@ -8,11 +8,15 @@ setup() {
     SG_VPC_ID=""
     SG_SOURCE_ID=""
     SG_TARGET_ID=""
+    TRANSIT_GATEWAY_ID=""
 }
 
 teardown() {
     if [ -n "$PREFIX_LIST_ID" ]; then
         aws_cmd ec2 delete-managed-prefix-list --prefix-list-id "$PREFIX_LIST_ID" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$TRANSIT_GATEWAY_ID" ]; then
+        aws_cmd ec2 delete-transit-gateway --transit-gateway-id "$TRANSIT_GATEWAY_ID" >/dev/null 2>&1 || true
     fi
     for sg in "$SG_TARGET_ID" "$SG_SOURCE_ID"; do
         if [ -n "$sg" ]; then
@@ -234,4 +238,62 @@ create_sg_pair() {
     [ "$desc" = "from-source-sg" ]
     cidr=$(json_get "$output" '.SecurityGroupRules[] | select(.FromPort==8443) | .CidrIpv4')
     [ "$cidr" = "10.0.0.0/8" ]
+}
+
+# ─── transit gateways ───────────────────────────────────────────────────────
+
+@test "EC2: create a transit gateway and read it back" {
+    run aws_cmd ec2 create-transit-gateway \
+        --description "bats hub" \
+        --tag-specifications 'ResourceType=transit-gateway,Tags=[{Key=Name,Value=bats-tgw}]'
+    assert_success
+    TRANSIT_GATEWAY_ID=$(json_get "$output" '.TransitGateway.TransitGatewayId')
+    [ "$(json_get "$output" '.TransitGateway.State')" = "available" ]
+    [ "$(json_get "$output" '.TransitGateway.Options.AmazonSideAsn')" = "64512" ]
+    [ "$(json_get "$output" '.TransitGateway.Options.SecurityGroupReferencingSupport')" = "disable" ]
+
+    # The default route table is minted with the gateway, so both ids are already set and equal.
+    assoc=$(json_get "$output" '.TransitGateway.Options.AssociationDefaultRouteTableId')
+    prop=$(json_get "$output" '.TransitGateway.Options.PropagationDefaultRouteTableId')
+    [ "$assoc" = "$prop" ]
+    case "$assoc" in tgw-rtb-*) ;; *) return 1 ;; esac
+
+    run aws_cmd ec2 describe-transit-gateways --transit-gateway-ids "$TRANSIT_GATEWAY_ID"
+    assert_success
+    [ "$(json_get "$output" '.TransitGateways[0].TransitGatewayId')" = "$TRANSIT_GATEWAY_ID" ]
+    [ "$(json_get "$output" '.TransitGateways[0].Tags[0].Value')" = "bats-tgw" ]
+}
+
+@test "EC2: modify a transit gateway" {
+    local out
+    out=$(aws_cmd ec2 create-transit-gateway --description "before")
+    TRANSIT_GATEWAY_ID=$(json_get "$out" '.TransitGateway.TransitGatewayId')
+
+    run aws_cmd ec2 modify-transit-gateway \
+        --transit-gateway-id "$TRANSIT_GATEWAY_ID" \
+        --description "after" \
+        --options 'DnsSupport=disable,AddTransitGatewayCidrBlocks=[10.100.0.0/16]'
+    assert_success
+    [ "$(json_get "$output" '.TransitGateway.Description')" = "after" ]
+    [ "$(json_get "$output" '.TransitGateway.Options.DnsSupport')" = "disable" ]
+    [ "$(json_get "$output" '.TransitGateway.Options.TransitGatewayCidrBlocks[0]')" = "10.100.0.0/16" ]
+}
+
+@test "EC2: delete a transit gateway" {
+    local out tgw
+    out=$(aws_cmd ec2 create-transit-gateway --description "short lived")
+    tgw=$(json_get "$out" '.TransitGateway.TransitGatewayId')
+
+    run aws_cmd ec2 delete-transit-gateway --transit-gateway-id "$tgw"
+    assert_success
+
+    run aws_cmd ec2 describe-transit-gateways --transit-gateway-ids "$tgw"
+    assert_failure
+    assert_output --partial "InvalidTransitGatewayID.NotFound"
+}
+
+@test "EC2: describing an unknown transit gateway is rejected" {
+    run aws_cmd ec2 describe-transit-gateways --transit-gateway-ids tgw-0123456789abcdef0
+    assert_failure
+    assert_output --partial "InvalidTransitGatewayID.NotFound"
 }

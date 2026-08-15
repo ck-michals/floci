@@ -310,6 +310,36 @@ resulting rule carries `prefixListId` in place of `cidrIpv4`, and `DescribeSecur
 the reference under the permission as `prefixListIds`. Authorizing against a list that does not
 exist returns `InvalidPrefixListID.NotFound`, so a typo cannot leave a rule pointing at nothing.
 
+### Transit Gateways
+
+| Action | Description |
+|--------|-------------|
+| CreateTransitGateway | Creates a transit gateway, applying AWS's option defaults and minting its default route table. |
+| DescribeTransitGateways | Lists or returns stored transit gateways. |
+| ModifyTransitGateway | Updates a transit gateway's description, options and CIDR blocks. |
+| DeleteTransitGateway | Deletes a transit gateway and the default route table created with it. |
+
+Transit gateway metadata only: nothing routes packets, and the value is in ids that later
+resources can reference and describes that round-trip so plans converge.
+
+Options left out of `CreateTransitGateway` take the same defaults AWS applies — `amazonSideAsn`
+64512, `dnsSupport`, `vpnEcmpSupport`, `defaultRouteTableAssociation` and
+`defaultRouteTablePropagation` enabled, and `autoAcceptSharedAttachments`,
+`securityGroupReferencingSupport` and `multicastSupport` disabled. `transitGatewayCidrBlocks` is
+omitted from the response entirely when no blocks are set, rather than sent empty.
+
+Creating a gateway with either default-route-table option enabled also creates the route table
+AWS creates, and reports its id as `associationDefaultRouteTableId` and
+`propagationDefaultRouteTableId`. Both name the same table. Disabling both leaves the ids absent.
+The actions that operate on transit gateway route tables directly — creating them, associating
+attachments, enabling propagation — are not implemented yet, and neither are attachments.
+
+State is reported settled rather than transitional: AWS returns a new gateway as `pending` and
+reaches `available` roughly a minute later, and reports `deleting` before `deleted`. Nothing here
+is slow, so callers see `available` and `deleted` immediately. `ModifyTransitGateway` and
+`DeleteTransitGateway` echo the gateway without its `tagSet`, matching AWS; `CreateTransitGateway`
+and `DescribeTransitGateways` include it.
+
 ### NAT Gateways
 
 | Action | Description |

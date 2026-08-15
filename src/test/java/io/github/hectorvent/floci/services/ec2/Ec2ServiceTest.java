@@ -23,6 +23,9 @@ import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.TransitGateway;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayOptions;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTable;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
@@ -1277,6 +1280,166 @@ class Ec2ServiceTest {
                 Map.of("resource-id", List.of(groupId))).getFirst().get("resourceType"));
         assertEquals(1, service.describeTags("us-east-1",
                 Map.of("resource-type", List.of("security-group"))).size());
+    }
+
+    // =========================================================================
+    // Transit gateways
+    // =========================================================================
+
+    /**
+     * Every default here was read off a live AWS account rather than the documentation, including
+     * the one that is easy to assume the other way: {@code securityGroupReferencingSupport} is
+     * {@code disable} on a new gateway.
+     */
+    @Test
+    void createTransitGatewayAppliesTheDefaultsAwsApplies() {
+        Ec2Service service = prefixListService();
+
+        TransitGateway gateway = service.createTransitGateway("us-east-1", "hub", null, List.of());
+
+        assertTrue(gateway.getTransitGatewayId().startsWith("tgw-"));
+        assertEquals("arn:aws:ec2:us-east-1:000000000000:transit-gateway/" + gateway.getTransitGatewayId(),
+                gateway.getTransitGatewayArn());
+        assertEquals("available", gateway.getState());
+        assertEquals("000000000000", gateway.getOwnerId());
+        assertEquals("hub", gateway.getDescription());
+
+        TransitGatewayOptions options = gateway.getOptions();
+        assertEquals(64512L, options.getAmazonSideAsn());
+        assertEquals("disable", options.getAutoAcceptSharedAttachments());
+        assertEquals("enable", options.getDefaultRouteTableAssociation());
+        assertEquals("enable", options.getDefaultRouteTablePropagation());
+        assertEquals("enable", options.getVpnEcmpSupport());
+        assertEquals("enable", options.getDnsSupport());
+        assertEquals("disable", options.getSecurityGroupReferencingSupport());
+        assertEquals("disable", options.getMulticastSupport());
+        assertTrue(options.getTransitGatewayCidrBlocks().isEmpty());
+    }
+
+    /**
+     * AWS mints the default route table during creation, so both ids are already on the create
+     * response and both name the same table.
+     */
+    @Test
+    void createTransitGatewayMintsTheDefaultRouteTableAndReportsItsId() {
+        Ec2Service service = prefixListService();
+
+        TransitGatewayOptions options =
+                service.createTransitGateway("us-east-1", null, null, List.of()).getOptions();
+
+        assertNotNull(options.getAssociationDefaultRouteTableId());
+        assertTrue(options.getAssociationDefaultRouteTableId().startsWith("tgw-rtb-"));
+        assertEquals(options.getAssociationDefaultRouteTableId(), options.getPropagationDefaultRouteTableId(),
+                "association and propagation point at the same default table");
+    }
+
+    @Test
+    void aGatewayThatOptsOutOfBothDefaultsGetsNoRouteTable() {
+        Ec2Service service = prefixListService();
+        TransitGatewayOptions requested = new TransitGatewayOptions();
+        requested.setDefaultRouteTableAssociation("disable");
+        requested.setDefaultRouteTablePropagation("disable");
+
+        TransitGatewayOptions options =
+                service.createTransitGateway("us-east-1", null, requested, List.of()).getOptions();
+
+        assertNull(options.getAssociationDefaultRouteTableId());
+        assertNull(options.getPropagationDefaultRouteTableId());
+    }
+
+    @Test
+    void requestedOptionsOverrideTheDefaults() {
+        Ec2Service service = prefixListService();
+        TransitGatewayOptions requested = new TransitGatewayOptions();
+        requested.setAmazonSideAsn(65001L);
+        requested.setDnsSupport("disable");
+        requested.setAutoAcceptSharedAttachments("enable");
+
+        TransitGatewayOptions options =
+                service.createTransitGateway("us-east-1", null, requested, List.of()).getOptions();
+
+        assertEquals(65001L, options.getAmazonSideAsn());
+        assertEquals("disable", options.getDnsSupport());
+        assertEquals("enable", options.getAutoAcceptSharedAttachments());
+        // Untouched options keep their defaults.
+        assertEquals("enable", options.getVpnEcmpSupport());
+    }
+
+    @Test
+    void describeTransitGatewaysFiltersAndRejectsUnknownIds() {
+        Ec2Service service = prefixListService();
+        TransitGateway gateway = service.createTransitGateway("us-east-1", "hub", null,
+                List.of(new Tag("env", "prod")));
+        service.createTransitGateway("us-east-1", "spoke", null, List.of());
+
+        assertEquals(2, service.describeTransitGateways("us-east-1", List.of(), Map.of()).size());
+        assertEquals(1, service.describeTransitGateways("us-east-1", List.of(),
+                Map.of("tag:env", List.of("prod"))).size());
+        assertEquals(gateway.getTransitGatewayId(), service.describeTransitGateways("us-east-1",
+                List.of(gateway.getTransitGatewayId()), Map.of()).getFirst().getTransitGatewayId());
+        // Another region cannot see it.
+        assertTrue(service.describeTransitGateways("eu-west-1", List.of(), Map.of()).isEmpty());
+
+        AwsException notFound = assertThrows(AwsException.class, () -> service.describeTransitGateways(
+                "us-east-1", List.of("tgw-0123456789abcdef0"), Map.of()));
+        assertEquals("InvalidTransitGatewayID.NotFound", notFound.getErrorCode());
+
+        AwsException malformed = assertThrows(AwsException.class, () -> service.describeTransitGateways(
+                "us-east-1", List.of("tgw-nope"), Map.of()));
+        assertEquals("InvalidTransitGatewayID.Malformed", malformed.getErrorCode());
+    }
+
+    @Test
+    void modifyTransitGatewayUpdatesDescriptionOptionsAndCidrBlocks() {
+        Ec2Service service = prefixListService();
+        String id = service.createTransitGateway("us-east-1", "before", null, List.of()).getTransitGatewayId();
+        TransitGatewayOptions changes = new TransitGatewayOptions();
+        changes.setDnsSupport("disable");
+
+        TransitGateway modified = service.modifyTransitGateway("us-east-1", id, "after", changes,
+                List.of("10.100.0.0/16", "10.101.0.0/16"), List.of());
+
+        assertEquals("after", modified.getDescription());
+        assertEquals("disable", modified.getOptions().getDnsSupport());
+        assertEquals(List.of("10.100.0.0/16", "10.101.0.0/16"),
+                modified.getOptions().getTransitGatewayCidrBlocks());
+
+        TransitGateway shrunk = service.modifyTransitGateway("us-east-1", id, null, null,
+                List.of(), List.of("10.100.0.0/16"));
+        assertEquals(List.of("10.101.0.0/16"), shrunk.getOptions().getTransitGatewayCidrBlocks());
+        assertEquals("after", shrunk.getDescription(), "a null description leaves the stored one alone");
+    }
+
+    @Test
+    void deleteTransitGatewayRemovesTheGatewayAndItsDefaultRouteTable() {
+        AccountAwareStorageBackend<TransitGatewayRouteTable> routeTables =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-transit-gateway-route-tables.json", routeTables)));
+        String id = service.createTransitGateway("us-east-1", "hub", null, List.of()).getTransitGatewayId();
+        assertEquals(1, routeTables.scan(k -> true).size(), "creation mints the default route table");
+
+        TransitGateway deleted = service.deleteTransitGateway("us-east-1", id);
+
+        assertEquals("deleted", deleted.getState());
+        assertTrue(routeTables.scan(k -> true).isEmpty(), "the default route table goes with the gateway");
+        AwsException gone = assertThrows(AwsException.class,
+                () -> service.describeTransitGateways("us-east-1", List.of(id), Map.of()));
+        assertEquals("InvalidTransitGatewayID.NotFound", gone.getErrorCode());
+    }
+
+    @Test
+    void tagsOnATransitGatewayAreTypedAsTransitGateway() {
+        Ec2Service service = prefixListService();
+        String id = service.createTransitGateway("us-east-1", "hub", null,
+                List.of(new Tag("env", "prod"))).getTransitGatewayId();
+
+        assertEquals("transit-gateway", service.describeTags("us-east-1",
+                Map.of("resource-id", List.of(id))).getFirst().get("resourceType"));
+        assertEquals(1, service.describeTags("us-east-1",
+                Map.of("resource-type", List.of("transit-gateway"))).size());
     }
 
     private static EmulatorConfig mockConfig(boolean ec2Mock) {

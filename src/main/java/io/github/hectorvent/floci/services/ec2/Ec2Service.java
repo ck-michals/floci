@@ -18,6 +18,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import org.jboss.logging.Logger;
@@ -28,6 +29,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
@@ -71,6 +73,9 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.TransitGateway;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayOptions;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTable;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
@@ -91,6 +96,9 @@ public class Ec2Service implements ContainerTeardown {
             .withZone(ZoneOffset.UTC);
     private static final int DEFAULT_ROOT_VOLUME_SIZE_GIB = 8;
     private static final String DEFAULT_ROOT_VOLUME_TYPE = "gp3";
+    // The ASN AWS assigns when CreateTransitGateway omits Options.AmazonSideAsn.
+    private static final long DEFAULT_AMAZON_SIDE_ASN = 64512L;
+    private static final Pattern TRANSIT_GATEWAY_ID_PATTERN = Pattern.compile("^tgw-[0-9a-f]{8}([0-9a-f]{9})?$");
 
     private final String accountId;
     private final EmulatorConfig config;
@@ -121,6 +129,8 @@ public class Ec2Service implements ContainerTeardown {
     private final StorageBackend<String, SpotInstanceRequest> spotInstanceRequests;
     private final StorageBackend<String, NetworkAcl> networkAcls;
     private final StorageBackend<String, ManagedPrefixList> managedPrefixLists;
+    private final StorageBackend<String, TransitGateway> transitGateways;
+    private final StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -151,7 +161,10 @@ public class Ec2Service implements ContainerTeardown {
                 storageFactory.create("ec2", "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
                 storageFactory.create("ec2", "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
                 storageFactory.create("ec2", "ec2-managed-prefix-lists.json", new TypeReference<Map<String, ManagedPrefixList>>() {}),
-                storageFactory.create("ec2", "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
+                storageFactory.create("ec2", "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}),
+                storageFactory.create("ec2", "ec2-transit-gateways.json", new TypeReference<Map<String, TransitGateway>>() {}),
+                storageFactory.create("ec2", "ec2-transit-gateway-route-tables.json",
+                        new TypeReference<Map<String, TransitGatewayRouteTable>>() {}));
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -178,6 +191,40 @@ public class Ec2Service implements ContainerTeardown {
                StorageBackend<String, NetworkAcl> networkAcls,
                StorageBackend<String, ManagedPrefixList> managedPrefixLists,
                StorageBackend<String, List<Tag>> tags) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
+                vpcs, subnets, securityGroups, securityGroupRules, internetGateways, routeTables, keyPairs,
+                addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
+                natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+    }
+
+    // Package-private for hermetic tests, transit-gateway-aware. The shorter overload above keeps its
+    // arity so existing fixtures still resolve it (#2103 and #2106 both broke CI by moving it).
+    Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
+               AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog,
+               StorageBackend<String, Vpc> vpcs,
+               StorageBackend<String, Subnet> subnets,
+               StorageBackend<String, SecurityGroup> securityGroups,
+               StorageBackend<String, SecurityGroupRule> securityGroupRules,
+               StorageBackend<String, InternetGateway> internetGateways,
+               StorageBackend<String, RouteTable> routeTables,
+               StorageBackend<String, KeyPair> keyPairs,
+               StorageBackend<String, Address> addresses,
+               StorageBackend<String, Instance> instances,
+               StorageBackend<String, Volume> volumes,
+               StorageBackend<String, Image> registeredImages,
+               StorageBackend<String, Snapshot> snapshots,
+               StorageBackend<String, LaunchTemplate> launchTemplates,
+               StorageBackend<String, VpcEndpoint> vpcEndpoints,
+               StorageBackend<String, NatGateway> natGateways,
+               StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
+               StorageBackend<String, NetworkAcl> networkAcls,
+               StorageBackend<String, ManagedPrefixList> managedPrefixLists,
+               StorageBackend<String, List<Tag>> tags,
+               StorageBackend<String, TransitGateway> transitGateways,
+               StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables) {
         this.accountId = config.defaultAccountId();
         this.config = config;
         this.containerManager = containerManager;
@@ -204,6 +251,8 @@ public class Ec2Service implements ContainerTeardown {
         this.networkAcls = networkAcls;
         this.managedPrefixLists = managedPrefixLists;
         this.tags = tags;
+        this.transitGateways = transitGateways;
+        this.transitGatewayRouteTables = transitGatewayRouteTables;
     }
 
     @PostConstruct
@@ -835,6 +884,229 @@ public class Ec2Service implements ContainerTeardown {
             sb.append(Integer.toHexString(rand.nextInt(16)));
         }
         return sb.toString();
+    }
+
+    // ─── Transit Gateways ──────────────────────────────────────────────────────
+
+    /**
+     * Creates a transit gateway. Option defaults, and the fact that the default route table is
+     * minted during creation rather than afterwards, were taken from a live AWS account rather
+     * than the documentation.
+     *
+     * <p>AWS returns the gateway as {@code pending} and reaches {@code available} about 50
+     * seconds later. Nothing here is slow, so the settled state is what the caller sees, the
+     * same compression {@code createManagedPrefixList} applies.
+     */
+    public TransitGateway createTransitGateway(String region, String description,
+                                               TransitGatewayOptions requested, List<Tag> gatewayTags) {
+        String transitGatewayId = "tgw-" + randomHex(17);
+        TransitGateway gateway = new TransitGateway();
+        gateway.setTransitGatewayId(transitGatewayId);
+        gateway.setTransitGatewayArn(AwsArnUtils.Arn
+                .of("ec2", region, accountId, "transit-gateway/" + transitGatewayId).toString());
+        gateway.setState("available");
+        gateway.setOwnerId(accountId);
+        gateway.setDescription(description);
+        gateway.setCreationTime(ISO_FMT.format(Instant.now()));
+        gateway.setRegion(region);
+        gateway.setOptions(resolveTransitGatewayOptions(requested));
+
+        TransitGatewayOptions options = gateway.getOptions();
+        if ("enable".equals(options.getDefaultRouteTableAssociation())
+                || "enable".equals(options.getDefaultRouteTablePropagation())) {
+            TransitGatewayRouteTable defaultRouteTable = createDefaultTransitGatewayRouteTable(region, gateway);
+            if ("enable".equals(options.getDefaultRouteTableAssociation())) {
+                options.setAssociationDefaultRouteTableId(defaultRouteTable.getTransitGatewayRouteTableId());
+            }
+            if ("enable".equals(options.getDefaultRouteTablePropagation())) {
+                options.setPropagationDefaultRouteTableId(defaultRouteTable.getTransitGatewayRouteTableId());
+            }
+        }
+
+        if (gatewayTags != null && !gatewayTags.isEmpty()) {
+            gateway.setTags(new ArrayList<>(gatewayTags));
+            tags.put(transitGatewayId, new ArrayList<>(gatewayTags));
+        }
+        transitGateways.put(key(region, transitGatewayId), gateway);
+        return gateway;
+    }
+
+    private TransitGatewayOptions resolveTransitGatewayOptions(TransitGatewayOptions requested) {
+        TransitGatewayOptions options = new TransitGatewayOptions();
+        options.setAmazonSideAsn(DEFAULT_AMAZON_SIDE_ASN);
+        options.setAutoAcceptSharedAttachments("disable");
+        options.setDefaultRouteTableAssociation("enable");
+        options.setDefaultRouteTablePropagation("enable");
+        options.setVpnEcmpSupport("enable");
+        options.setDnsSupport("enable");
+        options.setSecurityGroupReferencingSupport("disable");
+        options.setMulticastSupport("disable");
+        if (requested == null) {
+            return options;
+        }
+        if (requested.getAmazonSideAsn() != null) {
+            options.setAmazonSideAsn(requested.getAmazonSideAsn());
+        }
+        if (requested.getAutoAcceptSharedAttachments() != null) {
+            options.setAutoAcceptSharedAttachments(requested.getAutoAcceptSharedAttachments());
+        }
+        if (requested.getDefaultRouteTableAssociation() != null) {
+            options.setDefaultRouteTableAssociation(requested.getDefaultRouteTableAssociation());
+        }
+        if (requested.getDefaultRouteTablePropagation() != null) {
+            options.setDefaultRouteTablePropagation(requested.getDefaultRouteTablePropagation());
+        }
+        if (requested.getVpnEcmpSupport() != null) {
+            options.setVpnEcmpSupport(requested.getVpnEcmpSupport());
+        }
+        if (requested.getDnsSupport() != null) {
+            options.setDnsSupport(requested.getDnsSupport());
+        }
+        if (requested.getSecurityGroupReferencingSupport() != null) {
+            options.setSecurityGroupReferencingSupport(requested.getSecurityGroupReferencingSupport());
+        }
+        if (requested.getMulticastSupport() != null) {
+            options.setMulticastSupport(requested.getMulticastSupport());
+        }
+        if (requested.getTransitGatewayCidrBlocks() != null) {
+            options.setTransitGatewayCidrBlocks(new ArrayList<>(requested.getTransitGatewayCidrBlocks()));
+        }
+        return options;
+    }
+
+    private TransitGatewayRouteTable createDefaultTransitGatewayRouteTable(String region, TransitGateway gateway) {
+        TransitGatewayRouteTable routeTable = new TransitGatewayRouteTable();
+        String routeTableId = "tgw-rtb-" + randomHex(17);
+        routeTable.setTransitGatewayRouteTableId(routeTableId);
+        routeTable.setTransitGatewayId(gateway.getTransitGatewayId());
+        routeTable.setState("available");
+        routeTable.setDefaultAssociationRouteTable("enable".equals(gateway.getOptions().getDefaultRouteTableAssociation()));
+        routeTable.setDefaultPropagationRouteTable("enable".equals(gateway.getOptions().getDefaultRouteTablePropagation()));
+        routeTable.setCreationTime(ISO_FMT.format(Instant.now()));
+        routeTable.setRegion(region);
+        transitGatewayRouteTables.put(key(region, routeTableId), routeTable);
+        return routeTable;
+    }
+
+    public List<TransitGateway> describeTransitGateways(String region, List<String> transitGatewayIds,
+                                                        Map<String, List<String>> filters) {
+        transitGatewayIds.forEach(Ec2Service::requireWellFormedTransitGatewayId);
+        List<TransitGateway> all = transitGateways.scan(k -> true).stream()
+                .filter(gateway -> region.equals(gateway.getRegion()))
+                .collect(Collectors.toList());
+
+        for (String transitGatewayId : transitGatewayIds) {
+            if (all.stream().noneMatch(gateway -> gateway.getTransitGatewayId().equals(transitGatewayId))) {
+                throw new AwsException("InvalidTransitGatewayID.NotFound",
+                        "Transit Gateway " + transitGatewayId + " was deleted or does not exist.", 400);
+            }
+        }
+        return all.stream()
+                .filter(gateway -> transitGatewayIds.isEmpty()
+                        || transitGatewayIds.contains(gateway.getTransitGatewayId()))
+                .filter(gateway -> matchesFilters(gateway, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public TransitGateway modifyTransitGateway(String region, String transitGatewayId, String description,
+                                               TransitGatewayOptions changes, List<String> addCidrBlocks,
+                                               List<String> removeCidrBlocks) {
+        synchronized (lockFor(key(region, transitGatewayId))) {
+            TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
+            if (description != null) {
+                gateway.setDescription(description);
+            }
+            applyTransitGatewayOptionChanges(gateway.getOptions(), changes);
+            if (removeCidrBlocks != null && !removeCidrBlocks.isEmpty()) {
+                gateway.getOptions().getTransitGatewayCidrBlocks().removeIf(removeCidrBlocks::contains);
+            }
+            if (addCidrBlocks != null) {
+                for (String cidr : addCidrBlocks) {
+                    if (!gateway.getOptions().getTransitGatewayCidrBlocks().contains(cidr)) {
+                        gateway.getOptions().getTransitGatewayCidrBlocks().add(cidr);
+                    }
+                }
+            }
+            transitGateways.put(key(region, transitGatewayId), gateway);
+            return gateway;
+        }
+    }
+
+    private void applyTransitGatewayOptionChanges(TransitGatewayOptions options, TransitGatewayOptions changes) {
+        if (changes == null) {
+            return;
+        }
+        if (changes.getAmazonSideAsn() != null) {
+            options.setAmazonSideAsn(changes.getAmazonSideAsn());
+        }
+        if (changes.getAutoAcceptSharedAttachments() != null) {
+            options.setAutoAcceptSharedAttachments(changes.getAutoAcceptSharedAttachments());
+        }
+        if (changes.getDefaultRouteTableAssociation() != null) {
+            options.setDefaultRouteTableAssociation(changes.getDefaultRouteTableAssociation());
+        }
+        if (changes.getAssociationDefaultRouteTableId() != null) {
+            options.setAssociationDefaultRouteTableId(changes.getAssociationDefaultRouteTableId());
+        }
+        if (changes.getDefaultRouteTablePropagation() != null) {
+            options.setDefaultRouteTablePropagation(changes.getDefaultRouteTablePropagation());
+        }
+        if (changes.getPropagationDefaultRouteTableId() != null) {
+            options.setPropagationDefaultRouteTableId(changes.getPropagationDefaultRouteTableId());
+        }
+        if (changes.getVpnEcmpSupport() != null) {
+            options.setVpnEcmpSupport(changes.getVpnEcmpSupport());
+        }
+        if (changes.getDnsSupport() != null) {
+            options.setDnsSupport(changes.getDnsSupport());
+        }
+        if (changes.getSecurityGroupReferencingSupport() != null) {
+            options.setSecurityGroupReferencingSupport(changes.getSecurityGroupReferencingSupport());
+        }
+        if (changes.getMulticastSupport() != null) {
+            options.setMulticastSupport(changes.getMulticastSupport());
+        }
+    }
+
+    /**
+     * Deletes a transit gateway and the default route table created with it, which is what the
+     * live API does — the route table disappears alongside the gateway rather than outliving it.
+     *
+     * <p>AWS reports {@code deleting} here and settles on {@code deleted} about a minute later;
+     * the returned object carries the settled state for the same reason creation does.
+     */
+    public TransitGateway deleteTransitGateway(String region, String transitGatewayId) {
+        synchronized (lockFor(key(region, transitGatewayId))) {
+            TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
+            transitGatewayRouteTables.scan(k -> true).stream()
+                    .filter(routeTable -> region.equals(routeTable.getRegion()))
+                    .filter(routeTable -> transitGatewayId.equals(routeTable.getTransitGatewayId()))
+                    .toList()
+                    .forEach(routeTable -> transitGatewayRouteTables
+                            .delete(key(region, routeTable.getTransitGatewayRouteTableId())));
+            transitGateways.delete(key(region, transitGatewayId));
+            tags.delete(transitGatewayId);
+            gateway.setState("deleted");
+            return gateway;
+        }
+    }
+
+    private TransitGateway getRequiredTransitGateway(String region, String transitGatewayId) {
+        if (transitGatewayId == null || transitGatewayId.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter TransitGatewayId.", 400);
+        }
+        return describeTransitGateways(region, List.of(transitGatewayId), Map.of()).stream()
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidTransitGatewayID.NotFound",
+                        "Transit Gateway " + transitGatewayId + " was deleted or does not exist.", 400));
+    }
+
+    private static void requireWellFormedTransitGatewayId(String transitGatewayId) {
+        if (!TRANSIT_GATEWAY_ID_PATTERN.matcher(transitGatewayId).matches()) {
+            throw new AwsException("InvalidTransitGatewayID.Malformed",
+                    "Invalid Transit Gateway id " + transitGatewayId + ".", 400);
+        }
     }
 
     // ─── Instances ─────────────────────────────────────────────────────────────
@@ -2848,6 +3120,13 @@ public class Ec2Service implements ContainerTeardown {
         if (resourceId.startsWith("pl-")) {
             return "prefix-list";
         }
+        // Checked before the gateway prefix, which it starts with.
+        if (resourceId.startsWith("tgw-rtb-")) {
+            return "transit-gateway-route-table";
+        }
+        if (resourceId.startsWith("tgw-")) {
+            return "transit-gateway";
+        }
         return "unknown";
     }
 
@@ -3357,6 +3636,22 @@ public class Ec2Service implements ContainerTeardown {
                 default -> true;
             };
         }
+        if (resource instanceof TransitGateway gateway) {
+            return switch (filterName) {
+                case "transit-gateway-id" -> matchesValue(values, gateway.getTransitGatewayId());
+                case "state" -> matchesValue(values, gateway.getState());
+                case "owner-id" -> matchesValue(values, gateway.getOwnerId());
+                case "options.amazon-side-asn" ->
+                        matchesValue(values, String.valueOf(gateway.getOptions().getAmazonSideAsn()));
+                case "options.association-default-route-table-id" ->
+                        matchesValue(values, gateway.getOptions().getAssociationDefaultRouteTableId());
+                case "options.propagation-default-route-table-id" ->
+                        matchesValue(values, gateway.getOptions().getPropagationDefaultRouteTableId());
+                case "options.dns-support" -> matchesValue(values, gateway.getOptions().getDnsSupport());
+                case "options.vpn-ecmp-support" -> matchesValue(values, gateway.getOptions().getVpnEcmpSupport());
+                default -> true;
+            };
+        }
         if (resource instanceof SecurityGroup sg) {
             return switch (filterName) {
                 case "group-id" -> matchesValue(values, sg.getGroupId());
@@ -3487,6 +3782,8 @@ public class Ec2Service implements ContainerTeardown {
         if (resource instanceof VpcEndpoint endpoint) return endpoint.getTags();
         if (resource instanceof NatGateway natGateway) return natGateway.getTags();
         if (resource instanceof SpotInstanceRequest sir) return sir.getTags();
+        if (resource instanceof TransitGateway gateway) return gateway.getTags();
+        if (resource instanceof TransitGatewayRouteTable routeTable) return routeTable.getTags();
         return Collections.emptyList();
     }
 
