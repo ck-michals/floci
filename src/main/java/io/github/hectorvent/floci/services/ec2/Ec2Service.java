@@ -1046,21 +1046,29 @@ public class Ec2Service implements ContainerTeardown {
             return;
         }
         TransitGatewayOptions options = gateway.getOptions();
+        // The id on the options already carries any id the request supplied, so enabling without
+        // one keeps the table the gateway already names rather than dropping it.
         if (changes.getDefaultRouteTableAssociation() != null) {
-            boolean enabling = "enable".equals(changes.getDefaultRouteTableAssociation());
-            String routeTableId = enabling
-                    ? changes.getAssociationDefaultRouteTableId()
-                    : options.getAssociationDefaultRouteTableId();
-            options.setAssociationDefaultRouteTableId(enabling ? routeTableId : null);
-            markDefaultRouteTable(region, routeTableId, true, enabling);
+            if ("enable".equals(changes.getDefaultRouteTableAssociation())) {
+                markDefaultRouteTable(region, options.getAssociationDefaultRouteTableId(), true, true);
+            } else {
+                String previous = options.getAssociationDefaultRouteTableId();
+                options.setAssociationDefaultRouteTableId(null);
+                markDefaultRouteTable(region, previous, true, false);
+            }
+        } else if (changes.getAssociationDefaultRouteTableId() != null) {
+            markDefaultRouteTable(region, changes.getAssociationDefaultRouteTableId(), true, true);
         }
         if (changes.getDefaultRouteTablePropagation() != null) {
-            boolean enabling = "enable".equals(changes.getDefaultRouteTablePropagation());
-            String routeTableId = enabling
-                    ? changes.getPropagationDefaultRouteTableId()
-                    : options.getPropagationDefaultRouteTableId();
-            options.setPropagationDefaultRouteTableId(enabling ? routeTableId : null);
-            markDefaultRouteTable(region, routeTableId, false, enabling);
+            if ("enable".equals(changes.getDefaultRouteTablePropagation())) {
+                markDefaultRouteTable(region, options.getPropagationDefaultRouteTableId(), false, true);
+            } else {
+                String previous = options.getPropagationDefaultRouteTableId();
+                options.setPropagationDefaultRouteTableId(null);
+                markDefaultRouteTable(region, previous, false, false);
+            }
+        } else if (changes.getPropagationDefaultRouteTableId() != null) {
+            markDefaultRouteTable(region, changes.getPropagationDefaultRouteTableId(), false, true);
         }
     }
 
@@ -1090,25 +1098,48 @@ public class Ec2Service implements ContainerTeardown {
         if (changes == null) {
             return;
         }
+        TransitGatewayOptions current = gateway.getOptions();
         requireFlagAndRouteTableAgree(changes.getDefaultRouteTableAssociation(),
                 changes.getAssociationDefaultRouteTableId(),
+                current.getDefaultRouteTableAssociation(), current.getAssociationDefaultRouteTableId(),
                 "DefaultRouteTableAssociation", "AssociationDefaultRouteTableId");
         requireFlagAndRouteTableAgree(changes.getDefaultRouteTablePropagation(),
                 changes.getPropagationDefaultRouteTableId(),
+                current.getDefaultRouteTablePropagation(), current.getPropagationDefaultRouteTableId(),
                 "DefaultRouteTablePropagation", "PropagationDefaultRouteTableId");
         requireRouteTableOfGateway(region, gateway, changes.getAssociationDefaultRouteTableId());
         requireRouteTableOfGateway(region, gateway, changes.getPropagationDefaultRouteTableId());
     }
 
+    /**
+     * The flag and its route table id are judged against the gateway as it stands, not against the
+     * request alone — which is why an id may arrive on its own. Verified against a live account:
+     *
+     * <ul>
+     *   <li>an id on its own is accepted while the option is enabled, and rejected while it is
+     *       disabled, with the message quoting the stored flag rather than the request</li>
+     *   <li>{@code enable} on its own is accepted when the gateway already names a table, and
+     *       rejected when it does not</li>
+     *   <li>{@code disable} may not carry an id at all</li>
+     * </ul>
+     *
+     * <p>This runs before the table is looked up, matching AWS: a disabled option paired with an
+     * id that does not exist reports the combination rather than the missing table.
+     */
     private void requireFlagAndRouteTableAgree(String flag, String routeTableId,
+                                               String currentFlag, String currentRouteTableId,
                                                String flagName, String routeTableIdName) {
-        if (flag == null) {
+        String effectiveFlag = flag != null ? flag : currentFlag;
+        if (!"enable".equals(effectiveFlag)) {
+            if (routeTableId != null) {
+                throw new AwsException("InvalidParameterCombination",
+                        "disable " + flagName + " conflicts with " + routeTableIdName + " " + routeTableId, 400);
+            }
             return;
         }
-        boolean enabling = "enable".equals(flag);
-        if (enabling == (routeTableId == null)) {
+        if (flag != null && routeTableId == null && currentRouteTableId == null) {
             throw new AwsException("InvalidParameterCombination",
-                    flag + " " + flagName + " conflicts with " + routeTableIdName + " " + routeTableId, 400);
+                    "enable " + flagName + " conflicts with " + routeTableIdName + " null", 400);
         }
     }
 

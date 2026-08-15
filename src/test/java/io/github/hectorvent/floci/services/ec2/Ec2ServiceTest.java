@@ -1497,6 +1497,66 @@ class Ec2ServiceTest {
                 .getFirst().getOptions().getAssociationDefaultRouteTableId());
     }
 
+    /**
+     * The whole flag/id contract, as observed on a live account. The pair is judged against the
+     * gateway as it stands rather than against the request alone, which is what makes an id on its
+     * own legal while the option is enabled and a conflict while it is disabled.
+     */
+    @Test
+    void aRouteTableIdOnItsOwnFollowsTheStoredFlag() {
+        Ec2Service service = prefixListService();
+        TransitGateway gateway = service.createTransitGateway("us-east-1", "hub", null, List.of());
+        String id = gateway.getTransitGatewayId();
+        String routeTableId = gateway.getOptions().getAssociationDefaultRouteTableId();
+
+        // Enabled: an id on its own is accepted, and enable on its own keeps the stored table.
+        TransitGatewayOptions idOnly = new TransitGatewayOptions();
+        idOnly.setAssociationDefaultRouteTableId(routeTableId);
+        assertEquals(routeTableId, service.modifyTransitGateway("us-east-1", id, null, idOnly,
+                List.of(), List.of()).getOptions().getAssociationDefaultRouteTableId());
+
+        TransitGatewayOptions flagOnly = new TransitGatewayOptions();
+        flagOnly.setDefaultRouteTableAssociation("enable");
+        assertEquals(routeTableId, service.modifyTransitGateway("us-east-1", id, null, flagOnly,
+                List.of(), List.of()).getOptions().getAssociationDefaultRouteTableId(),
+                "enable on its own keeps the table already named");
+
+        // Disabled: the same id-only request now conflicts, and the message quotes the stored flag.
+        TransitGatewayOptions disable = new TransitGatewayOptions();
+        disable.setDefaultRouteTableAssociation("disable");
+        service.modifyTransitGateway("us-east-1", id, null, disable, List.of(), List.of());
+
+        AwsException conflict = assertThrows(AwsException.class, () -> service.modifyTransitGateway(
+                "us-east-1", id, null, idOnly, List.of(), List.of()));
+        assertEquals("InvalidParameterCombination", conflict.getErrorCode());
+        assertTrue(conflict.getMessage().startsWith("disable DefaultRouteTableAssociation"),
+                "the stored flag is what the message reports, got: " + conflict.getMessage());
+
+        // A disabled option paired with an unknown table reports the combination, not the lookup.
+        TransitGatewayOptions unknownIdOnly = new TransitGatewayOptions();
+        unknownIdOnly.setAssociationDefaultRouteTableId("tgw-rtb-0123456789abcdef0");
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> service.modifyTransitGateway("us-east-1", id, null, unknownIdOnly,
+                        List.of(), List.of())).getErrorCode());
+
+        // And enable on its own is a conflict once there is no table left to keep.
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> service.modifyTransitGateway("us-east-1", id, null, flagOnly,
+                        List.of(), List.of())).getErrorCode());
+    }
+
+    /** Removals apply before additions, so a CIDR added and removed in one call survives. */
+    @Test
+    void aCidrBlockAddedAndRemovedInOneCallSurvives() {
+        Ec2Service service = prefixListService();
+        String id = service.createTransitGateway("us-east-1", null, null, List.of()).getTransitGatewayId();
+
+        TransitGatewayOptions after = service.modifyTransitGateway("us-east-1", id, null, null,
+                List.of("10.200.0.0/16"), List.of("10.200.0.0/16")).getOptions();
+
+        assertEquals(List.of("10.200.0.0/16"), after.getTransitGatewayCidrBlocks());
+    }
+
     /** Repointing the default route table at the gateway's own table is accepted. */
     @Test
     void aDefaultRouteTableOptionCanBeSetWhenItsRouteTableIsNamed() {
