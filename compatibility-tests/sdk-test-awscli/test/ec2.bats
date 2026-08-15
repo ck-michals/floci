@@ -277,6 +277,11 @@ create_sg_pair() {
     [ "$(json_get "$output" '.TransitGateway.Description')" = "after" ]
     [ "$(json_get "$output" '.TransitGateway.Options.DnsSupport')" = "disable" ]
     [ "$(json_get "$output" '.TransitGateway.Options.TransitGatewayCidrBlocks[0]')" = "10.100.0.0/16" ]
+
+    # Describe serializes the same list, so read it back through the CLI's own parser too.
+    run aws_cmd ec2 describe-transit-gateways --transit-gateway-ids "$TRANSIT_GATEWAY_ID"
+    assert_success
+    [ "$(json_get "$output" '.TransitGateways[0].Options.TransitGatewayCidrBlocks[0]')" = "10.100.0.0/16" ]
 }
 
 @test "EC2: delete a transit gateway" {

@@ -108,7 +108,9 @@ class Ec2TransitGatewayIntegrationTest {
         .then().statusCode(200)
             .body("ModifyTransitGatewayResponse.transitGateway.description", equalTo("hub-modified"))
             .body("ModifyTransitGatewayResponse.transitGateway.options.dnsSupport", equalTo("disable"))
-            .body("ModifyTransitGatewayResponse.transitGateway.options.transitGatewayCidrBlocks.item.cidrBlock",
+            // A plain string list: the CIDR is the item's own text, which is what the AWS CLI
+            // parses back into TransitGatewayCidrBlocks[0].
+            .body("ModifyTransitGatewayResponse.transitGateway.options.transitGatewayCidrBlocks.item",
                     equalTo("10.100.0.0/16"))
             .extract().asString();
 

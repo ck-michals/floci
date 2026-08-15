@@ -1275,9 +1275,11 @@ public class Ec2QueryHandler {
         List<String> cidrBlocks = gateway.getOptions().getTransitGatewayCidrBlocks();
         // AWS omits the member entirely rather than sending an empty set.
         if (cidrBlocks != null && !cidrBlocks.isEmpty()) {
+            // A plain string list (ValueStringList), so each item carries the CIDR as its own text
+            // rather than wrapping it in an element.
             xml.start("transitGatewayCidrBlocks");
             for (String cidr : cidrBlocks) {
-                xml.start("item").elem("cidrBlock", cidr).end("item");
+                xml.elem("item", cidr);
             }
             xml.end("transitGatewayCidrBlocks");
         }
