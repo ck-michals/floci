@@ -3174,6 +3174,18 @@ public class Ec2Service implements ContainerTeardown {
         if (prefixList != null) {
             prefixList.setTags(new ArrayList<>(tagList));
             managedPrefixLists.put(storeKey, prefixList);
+            return;
+        }
+        TransitGateway gateway = transitGateways.get(storeKey).orElse(null);
+        if (gateway != null) {
+            gateway.setTags(new ArrayList<>(tagList));
+            transitGateways.put(storeKey, gateway);
+            return;
+        }
+        TransitGatewayRouteTable routeTable = transitGatewayRouteTables.get(storeKey).orElse(null);
+        if (routeTable != null) {
+            routeTable.setTags(new ArrayList<>(tagList));
+            transitGatewayRouteTables.put(storeKey, routeTable);
         }
     }
 

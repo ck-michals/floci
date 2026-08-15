@@ -264,6 +264,43 @@ create_sg_pair() {
     [ "$(json_get "$output" '.TransitGateways[0].Tags[0].Value')" = "bats-tgw" ]
 }
 
+@test "EC2: create a transit gateway with CIDR blocks" {
+    run aws_cmd ec2 create-transit-gateway \
+        --options 'TransitGatewayCidrBlocks=[10.99.0.0/16]'
+    assert_success
+    TRANSIT_GATEWAY_ID=$(json_get "$output" '.TransitGateway.TransitGatewayId')
+    [ "$(json_get "$output" '.TransitGateway.Options.TransitGatewayCidrBlocks[0]')" = "10.99.0.0/16" ]
+
+    run aws_cmd ec2 describe-transit-gateways --transit-gateway-ids "$TRANSIT_GATEWAY_ID"
+    assert_success
+    [ "$(json_get "$output" '.TransitGateways[0].Options.TransitGatewayCidrBlocks[0]')" = "10.99.0.0/16" ]
+}
+
+# Tags are changed after creation with create-tags rather than a tag specification, and read back
+# from describe-transit-gateways, which is how a Terraform tag update converges.
+@test "EC2: transit gateway tags changed after creation are visible on describe" {
+    local out
+    out=$(aws_cmd ec2 create-transit-gateway --tag-specifications \
+        'ResourceType=transit-gateway,Tags=[{Key=Name,Value=bats-tgw-tags}]')
+    TRANSIT_GATEWAY_ID=$(json_get "$out" '.TransitGateway.TransitGatewayId')
+
+    aws_cmd ec2 create-tags --resources "$TRANSIT_GATEWAY_ID" --tags 'Key=env,Value=prod' >/dev/null
+
+    run aws_cmd ec2 describe-transit-gateways --transit-gateway-ids "$TRANSIT_GATEWAY_ID"
+    assert_success
+    count=$(json_get "$output" '.TransitGateways[0].Tags | length')
+    [ "$count" = "2" ]
+    env_value=$(json_get "$output" '.TransitGateways[0].Tags[] | select(.Key=="env") | .Value')
+    [ "$env_value" = "prod" ]
+
+    aws_cmd ec2 delete-tags --resources "$TRANSIT_GATEWAY_ID" --tags 'Key=env' >/dev/null
+
+    run aws_cmd ec2 describe-transit-gateways --transit-gateway-ids "$TRANSIT_GATEWAY_ID"
+    assert_success
+    count=$(json_get "$output" '.TransitGateways[0].Tags | length')
+    [ "$count" = "1" ]
+}
+
 @test "EC2: modify a transit gateway" {
     local out
     out=$(aws_cmd ec2 create-transit-gateway --description "before")

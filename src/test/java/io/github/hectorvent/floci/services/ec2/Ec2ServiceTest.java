@@ -1628,6 +1628,32 @@ class Ec2ServiceTest {
         assertEquals("InvalidTransitGatewayID.NotFound", gone.getErrorCode());
     }
 
+    /**
+     * A provider changes tags after creation with CreateTags and DeleteTags rather than resending
+     * a TagSpecification, then re-reads them from DescribeTransitGateways. Those have to be the
+     * same tags, or the resource never converges.
+     */
+    @Test
+    void tagsChangedAfterCreationAreVisibleOnDescribe() {
+        Ec2Service service = prefixListService();
+        String id = service.createTransitGateway("us-east-1", "hub", null,
+                List.of(new Tag("Name", "hub"))).getTransitGatewayId();
+
+        service.createTags("us-east-1", List.of(id), List.of(new Tag("env", "prod")));
+
+        List<Tag> afterCreate = service.describeTransitGateways("us-east-1", List.of(id), Map.of())
+                .getFirst().getTags();
+        assertEquals(2, afterCreate.size(), "describe serves the tags CreateTags stored");
+        assertTrue(afterCreate.stream().anyMatch(t -> "env".equals(t.getKey()) && "prod".equals(t.getValue())));
+
+        service.deleteTags("us-east-1", List.of(id), List.of(new Tag("env", null)));
+
+        List<Tag> afterDelete = service.describeTransitGateways("us-east-1", List.of(id), Map.of())
+                .getFirst().getTags();
+        assertEquals(1, afterDelete.size());
+        assertEquals("Name", afterDelete.getFirst().getKey());
+    }
+
     @Test
     void tagsOnATransitGatewayAreTypedAsTransitGateway() {
         Ec2Service service = prefixListService();
