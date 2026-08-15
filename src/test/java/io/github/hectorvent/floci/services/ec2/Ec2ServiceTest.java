@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
@@ -1215,6 +1216,35 @@ class Ec2ServiceTest {
         assertEquals(1, rules.size());
         assertTrue(rules.getFirst().isEgress());
         assertEquals(list.getPrefixListId(), rules.getFirst().getPrefixListId());
+    }
+
+    /**
+     * A caller may name the source group by name alone, which authorize resolves to a group id
+     * before storing it. Scoped revocation has to resolve the same way, or a rule survives the
+     * revoke that names it.
+     */
+    @Test
+    void revokingAGroupSourceNamedByNameOnlyStillMatchesTheStoredReference() {
+        Ec2Service service = prefixListService();
+        String sourceId = service.createSecurityGroup("us-east-1", "app", "app", null).getGroupId();
+        String targetId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+
+        IpPermission authorized = tcpPermission(5432);
+        UserIdGroupPair byName = new UserIdGroupPair();
+        byName.setGroupName("app");
+        authorized.getUserIdGroupPairs().add(byName);
+        List<SecurityGroupRule> rules =
+                service.authorizeSecurityGroupIngress("us-east-1", targetId, List.of(authorized));
+        assertEquals(sourceId, rules.getFirst().getReferencedGroupInfo().getGroupId());
+
+        IpPermission revocation = tcpPermission(5432);
+        UserIdGroupPair alsoByName = new UserIdGroupPair();
+        alsoByName.setGroupName("app");
+        revocation.getUserIdGroupPairs().add(alsoByName);
+        service.revokeSecurityGroupIngress("us-east-1", targetId, List.of(revocation));
+
+        assertTrue(service.describeSecurityGroups("us-east-1", List.of(targetId), List.of(), Map.of())
+                .getFirst().getIpPermissions().isEmpty(), "the revoked group reference must be gone");
     }
 
     /**

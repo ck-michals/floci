@@ -1833,6 +1833,11 @@ public class Ec2Service implements ContainerTeardown {
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, groupId))) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            // Authorize stores a group reference by id, so a revoke naming it by name alone has to
+            // resolve the same way before the sources can be compared.
+            for (IpPermission perm : permissions) {
+                resolveGroupReferences(region, sg.getVpcId(), perm);
+            }
             List<IpPermission> next = revokeSources(new ArrayList<>(sg.getIpPermissions()), permissions);
             sg.setIpPermissions(next);
             securityGroups.put(key(region, groupId), sg);
@@ -1844,6 +1849,9 @@ public class Ec2Service implements ContainerTeardown {
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, groupId))) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            for (IpPermission perm : permissions) {
+                resolveGroupReferences(region, sg.getVpcId(), perm);
+            }
             List<IpPermission> next = revokeSources(new ArrayList<>(sg.getIpPermissionsEgress()), permissions);
             sg.setIpPermissionsEgress(next);
             securityGroups.put(key(region, groupId), sg);
