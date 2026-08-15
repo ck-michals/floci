@@ -59,6 +59,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -104,7 +105,9 @@ class ContainerLauncherTest {
         lenient().when(tls.enabled()).thenReturn(false);
         lenient().when(config.defaultRegion()).thenReturn("us-east-1");
         lenient().when(config.hostname()).thenReturn(Optional.empty());
+        // The large-code path resolves a code-volume completion marker under the storage persistent path.
         lenient().when(config.storage()).thenReturn(storage);
+        lenient().when(storage.persistentPath()).thenReturn(tempDir.toString());
         lenient().when(storage.efs()).thenReturn(efs);
         lenient().when(efs.ownerUid()).thenReturn(OptionalInt.empty());
         lenient().when(efs.ownerGid()).thenReturn(OptionalInt.empty());
@@ -1293,10 +1296,12 @@ class ContainerLauncherTest {
 
         launcherWithRealStreamer.launch(fn);
 
-        // The frame became a CloudWatch log event in the function's own log group.
+        // The frame became a CloudWatch log event in the function's own log group. Forwarding goes
+        // through the account-aware overload with a null account id: exec streams have no owning
+        // account of their own, so they land in the default account's copy of the log group.
         ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.forClass(List.class);
-        verify(cloudWatchLogs, atLeastOnce()).putLogEvents(
-                eq("/aws/lambda/observability-fn"), anyString(), events.capture(), anyString());
+        verify(cloudWatchLogs, atLeastOnce()).putLogEventsForAccount(
+                isNull(), eq("/aws/lambda/observability-fn"), anyString(), events.capture(), anyString());
         assertTrue(events.getAllValues().stream()
                         .flatMap(List::stream)
                         .anyMatch(e -> "extension started on :8080".equals(e.get("message"))),
