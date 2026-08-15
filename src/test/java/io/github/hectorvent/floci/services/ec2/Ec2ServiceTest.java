@@ -1459,6 +1459,44 @@ class Ec2ServiceTest {
         assertNull(after.getAssociationDefaultRouteTableId());
     }
 
+    /**
+     * Verified against a live account: a route table belonging to another gateway is rejected
+     * under the same code as one that exists nowhere, with the gateway named in the message.
+     * Without the ownership check the foreign table's own default markers would be rewritten.
+     */
+    @Test
+    void aRouteTableBelongingToAnotherGatewayIsRejected() {
+        AccountAwareStorageBackend<TransitGatewayRouteTable> routeTables =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-transit-gateway-route-tables.json", routeTables)));
+        TransitGatewayOptions defaultsOff = new TransitGatewayOptions();
+        defaultsOff.setDefaultRouteTableAssociation("disable");
+        defaultsOff.setDefaultRouteTablePropagation("disable");
+        String borrower = service.createTransitGateway("us-east-1", "borrower", defaultsOff, List.of())
+                .getTransitGatewayId();
+        TransitGateway owner = service.createTransitGateway("us-east-1", "owner", null, List.of());
+        String ownersRouteTable = owner.getOptions().getAssociationDefaultRouteTableId();
+
+        TransitGatewayOptions changes = new TransitGatewayOptions();
+        changes.setDefaultRouteTableAssociation("enable");
+        changes.setAssociationDefaultRouteTableId(ownersRouteTable);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.modifyTransitGateway(
+                "us-east-1", borrower, null, changes, List.of(), List.of()));
+        assertEquals("InvalidRouteTableID.NotFound", error.getErrorCode());
+        assertTrue(error.getMessage().contains(borrower),
+                "the message names the gateway the table is missing from");
+
+        // The owner's table kept its markers, and the borrower stayed disabled.
+        TransitGatewayRouteTable stored = routeTables.get("us-east-1::" + ownersRouteTable).orElseThrow();
+        assertTrue(stored.isDefaultAssociationRouteTable());
+        assertNull(service.describeTransitGateways("us-east-1", List.of(borrower), Map.of())
+                .getFirst().getOptions().getAssociationDefaultRouteTableId());
+    }
+
     /** Repointing the default route table at the gateway's own table is accepted. */
     @Test
     void aDefaultRouteTableOptionCanBeSetWhenItsRouteTableIsNamed() {

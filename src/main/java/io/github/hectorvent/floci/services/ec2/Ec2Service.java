@@ -1013,7 +1013,7 @@ public class Ec2Service implements ContainerTeardown {
                                                List<String> removeCidrBlocks) {
         synchronized (lockFor(key(region, transitGatewayId))) {
             TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
-            requireCoherentDefaultRouteTableChange(region, changes);
+            requireCoherentDefaultRouteTableChange(region, gateway, changes);
             if (description != null) {
                 gateway.setDescription(description);
             }
@@ -1085,7 +1085,8 @@ public class Ec2Service implements ContainerTeardown {
      * a live account, including that an unknown table is reported as
      * {@code InvalidRouteTableID.NotFound} rather than a transit-gateway-specific code.
      */
-    private void requireCoherentDefaultRouteTableChange(String region, TransitGatewayOptions changes) {
+    private void requireCoherentDefaultRouteTableChange(String region, TransitGateway gateway,
+                                                        TransitGatewayOptions changes) {
         if (changes == null) {
             return;
         }
@@ -1095,8 +1096,8 @@ public class Ec2Service implements ContainerTeardown {
         requireFlagAndRouteTableAgree(changes.getDefaultRouteTablePropagation(),
                 changes.getPropagationDefaultRouteTableId(),
                 "DefaultRouteTablePropagation", "PropagationDefaultRouteTableId");
-        requireKnownTransitGatewayRouteTable(region, changes.getAssociationDefaultRouteTableId());
-        requireKnownTransitGatewayRouteTable(region, changes.getPropagationDefaultRouteTableId());
+        requireRouteTableOfGateway(region, gateway, changes.getAssociationDefaultRouteTableId());
+        requireRouteTableOfGateway(region, gateway, changes.getPropagationDefaultRouteTableId());
     }
 
     private void requireFlagAndRouteTableAgree(String flag, String routeTableId,
@@ -1111,13 +1112,24 @@ public class Ec2Service implements ContainerTeardown {
         }
     }
 
-    private void requireKnownTransitGatewayRouteTable(String region, String routeTableId) {
+    /**
+     * A default route table has to belong to the gateway naming it. AWS reports a table owned by
+     * another gateway under the same {@code InvalidRouteTableID.NotFound} code as one that exists
+     * nowhere, but qualifies the message with the gateway; both wordings are reproduced here.
+     */
+    private void requireRouteTableOfGateway(String region, TransitGateway gateway, String routeTableId) {
         if (routeTableId == null) {
             return;
         }
-        if (transitGatewayRouteTables.get(key(region, routeTableId)).isEmpty()) {
+        TransitGatewayRouteTable routeTable = transitGatewayRouteTables.get(key(region, routeTableId)).orElse(null);
+        if (routeTable == null) {
             throw new AwsException("InvalidRouteTableID.NotFound",
                     "Transit Gateway Route Table " + routeTableId + " was deleted or does not exist.", 400);
+        }
+        if (!gateway.getTransitGatewayId().equals(routeTable.getTransitGatewayId())) {
+            throw new AwsException("InvalidRouteTableID.NotFound",
+                    "Transit Gateway Route Table " + routeTableId + " was deleted or does not exist in Transit Gateway "
+                            + gateway.getTransitGatewayId() + ".", 400);
         }
     }
 
