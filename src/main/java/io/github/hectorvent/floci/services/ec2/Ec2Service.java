@@ -1013,6 +1013,7 @@ public class Ec2Service implements ContainerTeardown {
                                                List<String> removeCidrBlocks) {
         synchronized (lockFor(key(region, transitGatewayId))) {
             TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
+            requireCoherentDefaultRouteTableChange(region, changes);
             if (description != null) {
                 gateway.setDescription(description);
             }
@@ -1029,6 +1030,49 @@ public class Ec2Service implements ContainerTeardown {
             }
             transitGateways.put(key(region, transitGatewayId), gateway);
             return gateway;
+        }
+    }
+
+    /**
+     * A default route table flag and its id have to move together, which is what stops the two
+     * from diverging: AWS will not enable association or propagation without being told which
+     * existing route table to use, and will not accept an id alongside a disable. Verified against
+     * a live account, including that an unknown table is reported as
+     * {@code InvalidRouteTableID.NotFound} rather than a transit-gateway-specific code.
+     */
+    private void requireCoherentDefaultRouteTableChange(String region, TransitGatewayOptions changes) {
+        if (changes == null) {
+            return;
+        }
+        requireFlagAndRouteTableAgree(changes.getDefaultRouteTableAssociation(),
+                changes.getAssociationDefaultRouteTableId(),
+                "DefaultRouteTableAssociation", "AssociationDefaultRouteTableId");
+        requireFlagAndRouteTableAgree(changes.getDefaultRouteTablePropagation(),
+                changes.getPropagationDefaultRouteTableId(),
+                "DefaultRouteTablePropagation", "PropagationDefaultRouteTableId");
+        requireKnownTransitGatewayRouteTable(region, changes.getAssociationDefaultRouteTableId());
+        requireKnownTransitGatewayRouteTable(region, changes.getPropagationDefaultRouteTableId());
+    }
+
+    private void requireFlagAndRouteTableAgree(String flag, String routeTableId,
+                                               String flagName, String routeTableIdName) {
+        if (flag == null) {
+            return;
+        }
+        boolean enabling = "enable".equals(flag);
+        if (enabling == (routeTableId == null)) {
+            throw new AwsException("InvalidParameterCombination",
+                    flag + " " + flagName + " conflicts with " + routeTableIdName + " " + routeTableId, 400);
+        }
+    }
+
+    private void requireKnownTransitGatewayRouteTable(String region, String routeTableId) {
+        if (routeTableId == null) {
+            return;
+        }
+        if (transitGatewayRouteTables.get(key(region, routeTableId)).isEmpty()) {
+            throw new AwsException("InvalidRouteTableID.NotFound",
+                    "Transit Gateway Route Table " + routeTableId + " was deleted or does not exist.", 400);
         }
     }
 

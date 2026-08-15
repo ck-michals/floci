@@ -1410,6 +1410,73 @@ class Ec2ServiceTest {
         assertEquals("after", shrunk.getDescription(), "a null description leaves the stored one alone");
     }
 
+    /**
+     * The flag and its route table id have to move together. Verified against a live account: AWS
+     * refuses to enable association or propagation without being told which existing table to use,
+     * refuses an id alongside a disable, and reports an unknown table as
+     * {@code InvalidRouteTableID.NotFound}. Without this a gateway could report the option enabled
+     * while carrying no id at all.
+     */
+    @Test
+    void enablingADefaultRouteTableOptionRequiresAnExistingRouteTable() {
+        Ec2Service service = prefixListService();
+        TransitGatewayOptions createdWithout = new TransitGatewayOptions();
+        createdWithout.setDefaultRouteTableAssociation("disable");
+        createdWithout.setDefaultRouteTablePropagation("disable");
+        String id = service.createTransitGateway("us-east-1", null, createdWithout, List.of())
+                .getTransitGatewayId();
+
+        TransitGatewayOptions enableOnly = new TransitGatewayOptions();
+        enableOnly.setDefaultRouteTableAssociation("enable");
+        AwsException noId = assertThrows(AwsException.class, () -> service.modifyTransitGateway(
+                "us-east-1", id, null, enableOnly, List.of(), List.of()));
+        assertEquals("InvalidParameterCombination", noId.getErrorCode());
+
+        TransitGatewayOptions propagationOnly = new TransitGatewayOptions();
+        propagationOnly.setDefaultRouteTablePropagation("enable");
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> service.modifyTransitGateway("us-east-1", id, null, propagationOnly,
+                        List.of(), List.of())).getErrorCode());
+
+        TransitGatewayOptions disableWithId = new TransitGatewayOptions();
+        disableWithId.setDefaultRouteTableAssociation("disable");
+        disableWithId.setAssociationDefaultRouteTableId("tgw-rtb-0123456789abcdef0");
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> service.modifyTransitGateway("us-east-1", id, null, disableWithId,
+                        List.of(), List.of())).getErrorCode());
+
+        TransitGatewayOptions unknownTable = new TransitGatewayOptions();
+        unknownTable.setDefaultRouteTableAssociation("enable");
+        unknownTable.setAssociationDefaultRouteTableId("tgw-rtb-0123456789abcdef0");
+        assertEquals("InvalidRouteTableID.NotFound", assertThrows(AwsException.class,
+                () -> service.modifyTransitGateway("us-east-1", id, null, unknownTable,
+                        List.of(), List.of())).getErrorCode());
+
+        // The rejected calls left the gateway as it was, rather than half-applied.
+        TransitGatewayOptions after = service.describeTransitGateways("us-east-1", List.of(id), Map.of())
+                .getFirst().getOptions();
+        assertEquals("disable", after.getDefaultRouteTableAssociation());
+        assertNull(after.getAssociationDefaultRouteTableId());
+    }
+
+    /** Repointing the default route table at the gateway's own table is accepted. */
+    @Test
+    void aDefaultRouteTableOptionCanBeSetWhenItsRouteTableIsNamed() {
+        Ec2Service service = prefixListService();
+        TransitGateway gateway = service.createTransitGateway("us-east-1", null, null, List.of());
+        String routeTableId = gateway.getOptions().getAssociationDefaultRouteTableId();
+
+        TransitGatewayOptions changes = new TransitGatewayOptions();
+        changes.setDefaultRouteTableAssociation("enable");
+        changes.setAssociationDefaultRouteTableId(routeTableId);
+
+        TransitGatewayOptions after = service.modifyTransitGateway("us-east-1",
+                gateway.getTransitGatewayId(), null, changes, List.of(), List.of()).getOptions();
+
+        assertEquals("enable", after.getDefaultRouteTableAssociation());
+        assertEquals(routeTableId, after.getAssociationDefaultRouteTableId());
+    }
+
     @Test
     void deleteTransitGatewayRemovesTheGatewayAndItsDefaultRouteTable() {
         AccountAwareStorageBackend<TransitGatewayRouteTable> routeTables =
