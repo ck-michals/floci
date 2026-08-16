@@ -7,6 +7,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -1835,9 +1836,139 @@ public class Ec2Service implements ContainerTeardown {
                 routes.add(route);
             }
         }
-        return routes.stream()
-                .filter(route -> matchesRouteFilters(route, filters))
-                .collect(Collectors.toList());
+        return applyRouteFilters(routes, filters);
+    }
+
+    /**
+     * The route search filters, as the live API applies them. The three CIDR relationship filters
+     * differ in the value they take, which is not something the reference spells out:
+     * {@code supernet-of-match} and {@code subnet-of-match} take a CIDR and match inclusively in
+     * either direction, while {@code longest-prefix-match} takes a bare address and returns the one
+     * most specific route covering it. Handing either the other's value form returns nothing on
+     * AWS, so the same holds here.
+     *
+     * <p>A filter name the API does not know is rejected rather than ignored: accepting it would
+     * answer a question that was never asked.
+     */
+    private List<TransitGatewayRoute> applyRouteFilters(List<TransitGatewayRoute> routes,
+                                                        Map<String, List<String>> filters) {
+        if (filters == null || filters.isEmpty()) {
+            return routes;
+        }
+        List<TransitGatewayRoute> matched = new ArrayList<>(routes);
+        for (Map.Entry<String, List<String>> filter : filters.entrySet()) {
+            String name = filter.getKey();
+            List<String> values = filter.getValue();
+            switch (name) {
+                case "type" -> matched.removeIf(route -> !matchesValue(values, route.getType()));
+                case "state" -> matched.removeIf(route -> !matchesValue(values, route.getState()));
+                case "route-search.exact-match" ->
+                        matched.removeIf(route -> !matchesValue(values, route.getDestinationCidrBlock()));
+                case "attachment.transit-gateway-attachment-id" ->
+                        matched.removeIf(route -> !matchesValue(values, route.getTransitGatewayAttachmentId()));
+                case "attachment.resource-id" ->
+                        matched.removeIf(route -> !matchesValue(values, route.getResourceId()));
+                case "attachment.resource-type" ->
+                        matched.removeIf(route -> !matchesValue(values, route.getResourceType()));
+                case "route-search.supernet-of-match" -> matched.removeIf(route -> values.stream()
+                        .noneMatch(value -> cidrContains(route.getDestinationCidrBlock(), value)));
+                case "route-search.subnet-of-match" -> matched.removeIf(route -> values.stream()
+                        .noneMatch(value -> cidrContains(value, route.getDestinationCidrBlock())));
+                case "route-search.longest-prefix-match" -> {
+                    List<TransitGatewayRoute> longest = new ArrayList<>();
+                    for (String address : values) {
+                        matched.stream()
+                                .filter(route -> cidrContainsAddress(route.getDestinationCidrBlock(), address))
+                                .max(Comparator.comparingInt(route ->
+                                        prefixLengthOf(route.getDestinationCidrBlock())))
+                                .ifPresent(longest::add);
+                    }
+                    matched.retainAll(longest);
+                }
+                default -> throw new AwsException("InvalidParameterValue",
+                        "Value (" + name + ") for parameter Filter is invalid. ", 400);
+            }
+        }
+        return matched;
+    }
+
+    /** Whether {@code outer} covers {@code inner}, both CIDRs, an equal pair counting as covered. */
+    private boolean cidrContains(String outer, String inner) {
+        int[] outerRange = cidrRange(outer);
+        int[] innerRange = cidrRange(inner);
+        if (outerRange == null || innerRange == null) {
+            return false;
+        }
+        return outerRange[1] <= innerRange[1]
+                && (innerRange[0] & maskOf(outerRange[1])) == outerRange[0];
+    }
+
+    /** Whether a CIDR covers a bare address, which is the form longest-prefix-match takes. */
+    private boolean cidrContainsAddress(String cidr, String address) {
+        if (address == null || address.contains("/")) {
+            return false;
+        }
+        int[] range = cidrRange(cidr);
+        Integer packed = packIpv4(address);
+        if (range == null || packed == null) {
+            return false;
+        }
+        return (packed & maskOf(range[1])) == range[0];
+    }
+
+    private int prefixLengthOf(String cidr) {
+        int[] range = cidrRange(cidr);
+        return range == null ? -1 : range[1];
+    }
+
+    /** The network address and prefix length of an IPv4 CIDR, or null when it is neither. */
+    private int[] cidrRange(String cidr) {
+        if (cidr == null) {
+            return null;
+        }
+        int slash = cidr.indexOf('/');
+        if (slash < 0) {
+            return null;
+        }
+        Integer packed = packIpv4(cidr.substring(0, slash));
+        if (packed == null) {
+            return null;
+        }
+        int prefix;
+        try {
+            prefix = Integer.parseInt(cidr.substring(slash + 1));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        if (prefix < 0 || prefix > 32) {
+            return null;
+        }
+        return new int[] {packed & maskOf(prefix), prefix};
+    }
+
+    private int maskOf(int prefixLength) {
+        return prefixLength == 0 ? 0 : (int) (-1L << (32 - prefixLength));
+    }
+
+    private Integer packIpv4(String address) {
+        String[] octets = address.split("\\.");
+        if (octets.length != 4) {
+            return null;
+        }
+        int packed = 0;
+        for (String octet : octets) {
+            int value;
+            try {
+                value = Integer.parseInt(octet);
+            } catch (NumberFormatException e) {
+                return null;
+            }
+            if (value < 0 || value > 255) {
+                return null;
+            }
+            packed = (packed << 8) | value;
+        }
+        return packed;
     }
 
     private List<String> vpcCidrBlocks(Vpc vpc) {
@@ -1850,29 +1981,6 @@ public class Ec2Service implements ContainerTeardown {
                 .filter(cidr -> cidr != null && !blocks.contains(cidr))
                 .forEach(blocks::add);
         return blocks;
-    }
-
-    private boolean matchesRouteFilters(TransitGatewayRoute route, Map<String, List<String>> filters) {
-        if (filters == null || filters.isEmpty()) {
-            return true;
-        }
-        for (Map.Entry<String, List<String>> filter : filters.entrySet()) {
-            boolean matched = switch (filter.getKey()) {
-                case "type" -> matchesValue(filter.getValue(), route.getType());
-                case "state" -> matchesValue(filter.getValue(), route.getState());
-                case "route-search.exact-match" ->
-                        matchesValue(filter.getValue(), route.getDestinationCidrBlock());
-                case "attachment.transit-gateway-attachment-id" ->
-                        matchesValue(filter.getValue(), route.getTransitGatewayAttachmentId());
-                case "attachment.resource-id" -> matchesValue(filter.getValue(), route.getResourceId());
-                case "attachment.resource-type" -> matchesValue(filter.getValue(), route.getResourceType());
-                default -> true;
-            };
-            if (!matched) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private List<TransitGatewayRoute> routesOf(String region, String routeTableId) {

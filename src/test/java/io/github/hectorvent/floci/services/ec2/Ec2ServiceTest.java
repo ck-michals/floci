@@ -2541,6 +2541,60 @@ class Ec2ServiceTest {
         assertNull(afterDetach.getTransitGatewayAttachmentId());
     }
 
+    /**
+     * The route search filters, as observed on a live account. The three CIDR relationship filters
+     * take different value forms: supernet-of-match and subnet-of-match take a CIDR and match
+     * inclusively, longest-prefix-match takes a bare address and returns the one most specific
+     * route covering it. Giving either the other's form returns nothing there, and here.
+     */
+    @Test
+    void routeSearchFiltersMatchTheLiveApi() {
+        Ec2Service service = prefixListService();
+        String[] fixture = routeTableFixture(service);
+        for (String cidr : List.of("10.0.0.0/8", "10.1.0.0/16", "10.1.1.0/24", "192.168.0.0/16")) {
+            service.createTransitGatewayRoute("us-east-1", fixture[4], cidr, null, true);
+        }
+
+        assertEquals(List.of("10.0.0.0/8", "10.1.0.0/16", "10.1.1.0/24"),
+                cidrsOf(service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                        Map.of("route-search.supernet-of-match", List.of("10.1.1.0/24")))),
+                "everything containing it, the exact match included");
+
+        assertEquals(List.of("10.1.0.0/16", "10.1.1.0/24"),
+                cidrsOf(service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                        Map.of("route-search.subnet-of-match", List.of("10.1.0.0/16")))),
+                "everything it contains, the exact match included");
+
+        assertEquals(List.of("10.1.1.0/24"),
+                cidrsOf(service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                        Map.of("route-search.longest-prefix-match", List.of("10.1.1.5")))),
+                "the most specific route covering the address");
+        assertEquals(List.of("10.1.0.0/16"),
+                cidrsOf(service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                        Map.of("route-search.longest-prefix-match", List.of("10.1.9.9")))));
+        assertTrue(service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                Map.of("route-search.longest-prefix-match", List.of("8.8.8.8"))).isEmpty(),
+                "nothing covers it");
+
+        // Each filter ignores the other's value form, exactly as the live API does.
+        assertTrue(service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                Map.of("route-search.longest-prefix-match", List.of("10.1.1.5/32"))).isEmpty(),
+                "longest-prefix-match takes an address, not a CIDR");
+        assertTrue(service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                Map.of("route-search.supernet-of-match", List.of("10.1.1.5"))).isEmpty(),
+                "supernet-of-match takes a CIDR, not an address");
+
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                        Map.of("nonsense", List.of("x"))));
+        assertEquals("InvalidParameterValue", unknown.getErrorCode());
+        assertTrue(unknown.getMessage().contains("nonsense"), unknown.getMessage());
+    }
+
+    private static List<String> cidrsOf(List<TransitGatewayRoute> routes) {
+        return routes.stream().map(TransitGatewayRoute::getDestinationCidrBlock).sorted().toList();
+    }
+
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
