@@ -1217,6 +1217,9 @@ public class Ec2Service implements ContainerTeardown {
      * the returned object carries the settled state for the same reason creation does.
      */
     public TransitGateway deleteTransitGateway(String region, String transitGatewayId) {
+        // Outermost first: the attachment check below and a concurrent attachment create have to
+        // agree on who goes first.
+        synchronized (attachmentTopologyLock(region)) {
         synchronized (lockFor(key(region, transitGatewayId))) {
             TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
             // AWS refuses while anything is still attached, naming the attachments in the message.
@@ -1239,6 +1242,7 @@ public class Ec2Service implements ContainerTeardown {
             tags.delete(transitGatewayId);
             gateway.setState("deleted");
             return gateway;
+        }
         }
     }
 
@@ -1274,19 +1278,20 @@ public class Ec2Service implements ContainerTeardown {
     public TransitGatewayVpcAttachment createTransitGatewayVpcAttachment(
             String region, String transitGatewayId, String vpcId, List<String> subnetIds,
             TransitGatewayVpcAttachmentOptions requested, List<Tag> attachmentTags) {
-        TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
-        getRequiredVpc(region, vpcId);
-        // SubnetIds is required on the request, and modify refuses to leave an attachment without
-        // any, so creation must not be a way to produce the subnet-less attachment modify forbids.
-        if (subnetIds == null || subnetIds.isEmpty()) {
-            throw new AwsException("MissingParameter",
-                    "The request must contain the parameter SubnetIds.", 400);
-        }
-        requireAttachableSubnets(region, vpcId, subnetIds, List.of());
-        // One attachment per VPC is a uniqueness rule, so the check and the write share the
-        // gateway's lock: racing creates for the same VPC would otherwise both find nothing and
-        // both store, leaving the duplicate the API promises never to have.
-        synchronized (lockFor(key(region, transitGatewayId))) {
+        // Everything an attachment depends on is resolved and written under one lock: the gateway
+        // it hangs off, the VPC and subnets it names, and the uniqueness rule. Resolving any of
+        // them outside it lets a concurrent delete land in between, leaving an attachment that
+        // names a gateway, VPC or subnet which no longer exists.
+        synchronized (attachmentTopologyLock(region)) {
+            TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
+            getRequiredVpc(region, vpcId);
+            // SubnetIds is required on the request, and modify refuses to leave an attachment
+            // without any, so creation must not be a way to produce what modify forbids.
+            if (subnetIds == null || subnetIds.isEmpty()) {
+                throw new AwsException("MissingParameter",
+                        "The request must contain the parameter SubnetIds.", 400);
+            }
+            requireAttachableSubnets(region, vpcId, subnetIds, List.of());
             boolean alreadyAttached = transitGatewayVpcAttachments.scan(k -> true).stream()
                     .filter(existing -> region.equals(existing.getRegion()))
                     .filter(existing -> transitGatewayId.equals(existing.getTransitGatewayId()))
@@ -1329,6 +1334,16 @@ public class Ec2Service implements ContainerTeardown {
         }
         transitGatewayVpcAttachments.put(key(region, attachmentId), attachment);
         return attachment;
+    }
+
+    /**
+     * One region-wide monitor for every operation that creates an attachment, removes one, or
+     * removes something an attachment depends on. Held outermost wherever a gateway lock is also
+     * taken, so the two never interleave in opposite orders. Per-resource striped locks cannot
+     * serve here: the dependency spans a gateway, a VPC and its subnets, which stripe separately.
+     */
+    private Object attachmentTopologyLock(String region) {
+        return lockFor(key(region, "transit-gateway-attachments"));
     }
 
     private TransitGatewayVpcAttachmentOptions resolveAttachmentOptions(
@@ -1387,7 +1402,7 @@ public class Ec2Service implements ContainerTeardown {
     public TransitGatewayVpcAttachment modifyTransitGatewayVpcAttachment(
             String region, String attachmentId, List<String> addSubnetIds, List<String> removeSubnetIds,
             TransitGatewayVpcAttachmentOptions changes) {
-        synchronized (lockFor(key(region, attachmentId))) {
+        synchronized (attachmentTopologyLock(region)) {
             TransitGatewayVpcAttachment attachment = getRequiredVpcAttachment(region, attachmentId);
             List<String> subnetIds = new ArrayList<>(attachment.getSubnetIds());
             if (removeSubnetIds != null) {
@@ -1434,7 +1449,7 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     public TransitGatewayVpcAttachment deleteTransitGatewayVpcAttachment(String region, String attachmentId) {
-        synchronized (lockFor(key(region, attachmentId))) {
+        synchronized (attachmentTopologyLock(region)) {
             TransitGatewayVpcAttachment attachment = getRequiredVpcAttachment(region, attachmentId);
             transitGatewayVpcAttachments.delete(key(region, attachmentId));
             tags.delete(attachmentId);
@@ -2009,11 +2024,12 @@ public class Ec2Service implements ContainerTeardown {
     public void deleteVpc(String region, String vpcId) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
-        requireNoTransitGatewayAttachment(region,
-                attachment -> vpcId.equals(attachment.getVpcId()),
-                "The vpc '" + vpcId + "' has dependencies and cannot be deleted.");
-
-        vpcs.delete(key(region, vpcId));
+        synchronized (attachmentTopologyLock(region)) {
+            requireNoTransitGatewayAttachment(region,
+                    attachment -> vpcId.equals(attachment.getVpcId()),
+                    "The vpc '" + vpcId + "' has dependencies and cannot be deleted.");
+            vpcs.delete(key(region, vpcId));
+        }
     }
 
     public void modifyVpcAttribute(String region, String vpcId, String attribute, String value) {
@@ -2238,10 +2254,12 @@ public class Ec2Service implements ContainerTeardown {
         if (subnets.get(key(region, subnetId)).isEmpty()) {
             throw new AwsException("InvalidSubnetID.NotFound", "The subnet ID '" + subnetId + "' does not exist", 400);
         }
-        requireNoTransitGatewayAttachment(region,
-                attachment -> attachment.getSubnetIds().contains(subnetId),
-                "The subnet '" + subnetId + "' has dependencies and cannot be deleted.");
-        subnets.delete(key(region, subnetId));
+        synchronized (attachmentTopologyLock(region)) {
+            requireNoTransitGatewayAttachment(region,
+                    attachment -> attachment.getSubnetIds().contains(subnetId),
+                    "The subnet '" + subnetId + "' has dependencies and cannot be deleted.");
+            subnets.delete(key(region, subnetId));
+        }
     }
 
     /**

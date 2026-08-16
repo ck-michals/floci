@@ -1779,6 +1779,66 @@ class Ec2ServiceTest {
     }
 
     /**
+     * Attaching races deleting the thing being attached to. Whoever wins, the store may never end
+     * up holding an attachment that names a gateway, VPC or subnet which is gone: resolving those
+     * outside the lock that guards the write is what allows exactly that.
+     */
+    @Test
+    void attachingNeverRacesAheadOfDeletingWhatItAttachesTo() throws Exception {
+        record Race(String name, boolean deleteGateway) {}
+        for (Race race : List.of(new Race("gateway", true), new Race("vpc", false))) {
+            for (int trial = 0; trial < 10; trial++) {
+                Ec2Service service = prefixListService();
+                String[] fixture = attachmentFixture(service);
+                java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+                java.util.concurrent.ExecutorService pool =
+                        java.util.concurrent.Executors.newFixedThreadPool(2);
+
+                pool.submit(() -> {
+                    try {
+                        start.await();
+                        service.createTransitGatewayVpcAttachment("us-east-1", fixture[0], fixture[1],
+                                List.of(fixture[2]), null, List.of());
+                    } catch (AwsException | InterruptedException ignored) {
+                        // Losing the race is a legitimate outcome; the invariant is checked below.
+                    }
+                });
+                pool.submit(() -> {
+                    try {
+                        start.await();
+                        if (race.deleteGateway()) {
+                            service.deleteTransitGateway("us-east-1", fixture[0]);
+                        } else {
+                            service.deleteSubnet("us-east-1", fixture[2]);
+                            service.deleteVpc("us-east-1", fixture[1]);
+                        }
+                    } catch (AwsException | InterruptedException ignored) {
+                        // Same.
+                    }
+                });
+                start.countDown();
+                pool.shutdown();
+                assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+
+                List<TransitGatewayVpcAttachment> attachments =
+                        service.describeTransitGatewayVpcAttachments("us-east-1", List.of(), Map.of());
+                for (TransitGatewayVpcAttachment attachment : attachments) {
+                    assertFalse(service.describeTransitGateways("us-east-1", List.of(), Map.of()).isEmpty(),
+                            race.name() + " trial " + trial + ": attachment outlived its gateway");
+                    assertTrue(service.describeVpcs("us-east-1", List.of(), Map.of()).stream()
+                                    .anyMatch(vpc -> vpc.getVpcId().equals(attachment.getVpcId())),
+                            race.name() + " trial " + trial + ": attachment names a deleted VPC");
+                    for (String subnetId : attachment.getSubnetIds()) {
+                        assertTrue(service.describeSubnets("us-east-1", List.of(subnetId), Map.of()).stream()
+                                        .anyMatch(subnet -> subnet.getSubnetId().equals(subnetId)),
+                                race.name() + " trial " + trial + ": attachment names a deleted subnet");
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Verified on a live account: an attached VPC or subnet cannot be deleted out from under the
      * attachment, and both report the same {@code DependencyViolation}. Without this the stored
      * attachment would go on naming resources that no longer exist, and a later modify would fail
