@@ -29,7 +29,9 @@ import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.TransitGateway;
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayOptions;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRoute;
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTable;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTablePropagation;
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachment;
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachmentOptions;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
@@ -2193,6 +2195,224 @@ class Ec2ServiceTest {
         assertEquals(2, service.describeTransitGatewayVpcAttachments("us-east-1",
                 List.of(attachmentId), Map.of()).getFirst().getTags().size(),
                 "describe serves tags added after creation");
+    }
+
+    // =========================================================================
+    // Transit gateway route tables, associations, propagations and routes
+    // =========================================================================
+
+    /** A gateway, an attachment, and a second route table to move things onto. */
+    private static String[] routeTableFixture(Ec2Service service) {
+        String[] fixture = attachmentFixture(service);
+        String attachmentId = service.createTransitGatewayVpcAttachment("us-east-1", fixture[0],
+                fixture[1], List.of(fixture[2]), null, List.of()).getTransitGatewayAttachmentId();
+        String routeTableId = service.createTransitGatewayRouteTable("us-east-1", fixture[0], List.of())
+                .getTransitGatewayRouteTableId();
+        return new String[] {fixture[0], fixture[1], fixture[2], attachmentId, routeTableId};
+    }
+
+    @Test
+    void aRequestedRouteTableIsNeitherDefault() {
+        Ec2Service service = prefixListService();
+        String[] fixture = attachmentFixture(service);
+
+        TransitGatewayRouteTable routeTable = service.createTransitGatewayRouteTable("us-east-1",
+                fixture[0], List.of(new Tag("Name", "spoke")));
+
+        assertTrue(routeTable.getTransitGatewayRouteTableId().startsWith("tgw-rtb-"));
+        assertEquals("available", routeTable.getState());
+        assertFalse(routeTable.isDefaultAssociationRouteTable());
+        assertFalse(routeTable.isDefaultPropagationRouteTable());
+        assertEquals(2, service.describeTransitGatewayRouteTables("us-east-1", List.of(), Map.of()).size(),
+                "the gateway's own default table is there too");
+    }
+
+    /** Verified live: an attachment associates with exactly one route table. */
+    @Test
+    void anAttachmentAssociatesWithOneRouteTableAtATime() {
+        Ec2Service service = prefixListService();
+        String[] fixture = routeTableFixture(service);
+
+        AwsException already = assertThrows(AwsException.class, () -> service
+                .associateTransitGatewayRouteTable("us-east-1", fixture[4], fixture[3]));
+        assertEquals("Resource.AlreadyAssociated", already.getErrorCode());
+
+        TransitGateway gateway = service.describeTransitGateways("us-east-1", List.of(fixture[0]), Map.of())
+                .getFirst();
+        String defaultTable = gateway.getOptions().getAssociationDefaultRouteTableId();
+        assertEquals(1, service.associationsOf("us-east-1", defaultTable).size(),
+                "the attachment starts on the gateway's default table");
+
+        service.disassociateTransitGatewayRouteTable("us-east-1", defaultTable, fixture[3]);
+        assertTrue(service.associationsOf("us-east-1", defaultTable).isEmpty());
+
+        service.associateTransitGatewayRouteTable("us-east-1", fixture[4], fixture[3]);
+        assertEquals(fixture[3], service.associationsOf("us-east-1", fixture[4]).getFirst()
+                .getTransitGatewayAttachmentId());
+    }
+
+    /** Verified live: propagation reports the settled state at once, and refuses a duplicate. */
+    @Test
+    void propagationIsEnabledAtOnceAndOnlyOnce() {
+        Ec2Service service = prefixListService();
+        String[] fixture = routeTableFixture(service);
+
+        TransitGatewayRouteTablePropagation propagation = service
+                .enableTransitGatewayRouteTablePropagation("us-east-1", fixture[4], fixture[3]);
+        assertEquals("enabled", propagation.getState());
+        assertEquals(fixture[1], propagation.getResourceId());
+        assertEquals("vpc", propagation.getResourceType());
+
+        assertEquals("TransitGatewayRouteTablePropagation.Duplicate", assertThrows(AwsException.class,
+                () -> service.enableTransitGatewayRouteTablePropagation("us-east-1", fixture[4], fixture[3]))
+                .getErrorCode());
+
+        assertEquals("disabled", service.disableTransitGatewayRouteTablePropagation(
+                "us-east-1", fixture[4], fixture[3]).getState());
+        assertTrue(service.propagationsOf("us-east-1", fixture[4]).isEmpty());
+    }
+
+    /**
+     * Verified live: enabling propagation makes the attached VPC's CIDR show up as a propagated
+     * route. It is derived from the VPC rather than stored, so a CIDR change cannot leave a stale
+     * route behind.
+     */
+    @Test
+    void propagationProducesRoutesForTheAttachedVpcsCidr() {
+        Ec2Service service = prefixListService();
+        String[] fixture = routeTableFixture(service);
+        service.enableTransitGatewayRouteTablePropagation("us-east-1", fixture[4], fixture[3]);
+
+        List<TransitGatewayRoute> propagated = service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                Map.of("type", List.of("propagated")));
+
+        assertEquals(1, propagated.size());
+        assertEquals("10.90.0.0/16", propagated.getFirst().getDestinationCidrBlock());
+        assertEquals("active", propagated.getFirst().getState());
+        assertEquals(fixture[3], propagated.getFirst().getTransitGatewayAttachmentId());
+
+        service.disableTransitGatewayRouteTablePropagation("us-east-1", fixture[4], fixture[3]);
+        assertTrue(service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                Map.of("type", List.of("propagated"))).isEmpty(), "the route goes with the propagation");
+    }
+
+    /** A blackhole is a state of a static route, not a type, and carries no attachment. */
+    @Test
+    void staticAndBlackholeRoutesDifferByStateNotType() {
+        Ec2Service service = prefixListService();
+        String[] fixture = routeTableFixture(service);
+
+        TransitGatewayRoute viaAttachment = service.createTransitGatewayRoute("us-east-1", fixture[4],
+                "10.60.0.0/16", fixture[3], false);
+        assertEquals("static", viaAttachment.getType());
+        assertEquals("active", viaAttachment.getState());
+        assertEquals(fixture[3], viaAttachment.getTransitGatewayAttachmentId());
+
+        TransitGatewayRoute blackhole = service.createTransitGatewayRoute("us-east-1", fixture[4],
+                "10.61.0.0/16", null, true);
+        assertEquals("static", blackhole.getType());
+        assertEquals("blackhole", blackhole.getState());
+        assertNull(blackhole.getTransitGatewayAttachmentId());
+
+        assertEquals("RouteAlreadyExists", assertThrows(AwsException.class,
+                () -> service.createTransitGatewayRoute("us-east-1", fixture[4], "10.60.0.0/16",
+                        fixture[3], false)).getErrorCode());
+
+        assertEquals(2, service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                Map.of("type", List.of("static"))).size(), "a blackhole is still a static route");
+
+        TransitGatewayRoute deleted = service.deleteTransitGatewayRoute("us-east-1", fixture[4], "10.61.0.0/16");
+        assertEquals("deleted", deleted.getState());
+        assertNull(deleted.getTransitGatewayAttachmentId());
+        assertEquals(1, service.searchTransitGatewayRoutes("us-east-1", fixture[4], Map.of()).size());
+    }
+
+    /**
+     * Verified live: a route table will not go while it is the gateway's default association table
+     * nor while attachments are associated with it, both under IncorrectState.
+     */
+    @Test
+    void aRouteTableInUseCannotBeDeleted() {
+        Ec2Service service = prefixListService();
+        String[] fixture = routeTableFixture(service);
+        TransitGateway gateway = service.describeTransitGateways("us-east-1", List.of(fixture[0]), Map.of())
+                .getFirst();
+        String defaultTable = gateway.getOptions().getAssociationDefaultRouteTableId();
+
+        AwsException isDefault = assertThrows(AwsException.class,
+                () -> service.deleteTransitGatewayRouteTable("us-east-1", defaultTable));
+        assertEquals("IncorrectState", isDefault.getErrorCode());
+        assertTrue(isDefault.getMessage().contains("default association route table"), isDefault.getMessage());
+
+        service.disassociateTransitGatewayRouteTable("us-east-1", defaultTable, fixture[3]);
+        service.associateTransitGatewayRouteTable("us-east-1", fixture[4], fixture[3]);
+
+        AwsException associated = assertThrows(AwsException.class,
+                () -> service.deleteTransitGatewayRouteTable("us-east-1", fixture[4]));
+        assertEquals("IncorrectState", associated.getErrorCode());
+        assertTrue(associated.getMessage().contains("has associated attachments"), associated.getMessage());
+
+        service.disassociateTransitGatewayRouteTable("us-east-1", fixture[4], fixture[3]);
+        service.createTransitGatewayRoute("us-east-1", fixture[4], "10.70.0.0/16", null, true);
+        assertEquals("deleted", service.deleteTransitGatewayRouteTable("us-east-1", fixture[4]).getState());
+        assertEquals("InvalidRouteTableID.NotFound", assertThrows(AwsException.class,
+                () -> service.searchTransitGatewayRoutes("us-east-1", fixture[4], Map.of())).getErrorCode(),
+                "its routes went with it");
+    }
+
+    /** Verified live, casing included: NotFound spells it ID, Malformed spells it Id. */
+    @Test
+    void routeTableIdErrorsMatchTheLiveApiIncludingCasing() {
+        Ec2Service service = prefixListService();
+
+        assertEquals("InvalidRouteTableID.NotFound", assertThrows(AwsException.class,
+                () -> service.describeTransitGatewayRouteTables("us-east-1",
+                        List.of("tgw-rtb-0123456789abcdef0"), Map.of())).getErrorCode());
+        assertEquals("InvalidRouteTableId.Malformed", assertThrows(AwsException.class,
+                () -> service.describeTransitGatewayRouteTables("us-east-1",
+                        List.of("tgw-rtb-nope"), Map.of())).getErrorCode());
+    }
+
+    /**
+     * Verified on a live account: deleting an attachment removes its propagations, and a static
+     * route that named it survives as a blackhole rather than disappearing — the destination is
+     * still configured, it just has nowhere to go.
+     */
+    @Test
+    void deletingAnAttachmentClearsPropagationsAndBlackholesItsRoutes() {
+        Ec2Service service = prefixListService();
+        String[] fixture = routeTableFixture(service);
+        service.enableTransitGatewayRouteTablePropagation("us-east-1", fixture[4], fixture[3]);
+        service.createTransitGatewayRoute("us-east-1", fixture[4], "10.99.0.0/16", fixture[3], false);
+
+        service.deleteTransitGatewayVpcAttachment("us-east-1", fixture[3]);
+
+        assertTrue(service.propagationsOf("us-east-1", fixture[4]).isEmpty(), "propagations go");
+        List<TransitGatewayRoute> routes = service.searchTransitGatewayRoutes("us-east-1", fixture[4], Map.of());
+        assertEquals(1, routes.size(), "the static route stays");
+        assertEquals("blackhole", routes.getFirst().getState());
+        assertNull(routes.getFirst().getTransitGatewayAttachmentId());
+        assertTrue(service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                Map.of("type", List.of("propagated"))).isEmpty(), "and its propagated route with it");
+    }
+
+    /** A gateway's route tables take their propagations, routes and tags with them. */
+    @Test
+    void deletingAGatewayLeavesNothingBehindItsRouteTables() {
+        Ec2Service service = prefixListService();
+        String[] fixture = routeTableFixture(service);
+        service.enableTransitGatewayRouteTablePropagation("us-east-1", fixture[4], fixture[3]);
+        service.createTransitGatewayRoute("us-east-1", fixture[4], "10.99.0.0/16", null, true);
+        service.createTags("us-east-1", List.of(fixture[4]), List.of(new Tag("env", "prod")));
+        service.deleteTransitGatewayVpcAttachment("us-east-1", fixture[3]);
+
+        service.deleteTransitGateway("us-east-1", fixture[0]);
+
+        assertTrue(service.describeTransitGatewayRouteTables("us-east-1", List.of(), Map.of()).isEmpty(),
+                "the tables go with the gateway");
+        assertTrue(service.propagationsOf("us-east-1", fixture[4]).isEmpty());
+        assertTrue(service.describeTags("us-east-1", Map.of("resource-id", List.of(fixture[4]))).isEmpty(),
+                "and their tags");
     }
 
     private static EmulatorConfig mockConfig(boolean ec2Mock) {

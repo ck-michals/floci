@@ -11,11 +11,16 @@ setup() {
     TRANSIT_GATEWAY_ID=""
     TGW_ATTACHMENT_ID=""
     TGW_VPC_ID=""
+    TGW_ROUTE_TABLE_ID=""
 }
 
 teardown() {
     if [ -n "$PREFIX_LIST_ID" ]; then
         aws_cmd ec2 delete-managed-prefix-list --prefix-list-id "$PREFIX_LIST_ID" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$TGW_ROUTE_TABLE_ID" ]; then
+        aws_cmd ec2 delete-transit-gateway-route-table \
+            --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" >/dev/null 2>&1 || true
     fi
     if [ -n "$TGW_ATTACHMENT_ID" ]; then
         aws_cmd ec2 delete-transit-gateway-vpc-attachment \
@@ -440,4 +445,125 @@ create_attachment_fixture() {
     run aws_cmd ec2 delete-transit-gateway --transit-gateway-id "$TRANSIT_GATEWAY_ID"
     assert_success
     TRANSIT_GATEWAY_ID=""
+}
+
+# ─── transit gateway route tables, associations, propagations and routes ────
+
+@test "EC2: route table associations move between tables" {
+    create_attachment_fixture
+    local out
+    out=$(aws_cmd ec2 create-transit-gateway-vpc-attachment --transit-gateway-id "$TRANSIT_GATEWAY_ID" \
+        --vpc-id "$TGW_VPC_ID" --subnet-ids "$TGW_SUBNET_ID")
+    TGW_ATTACHMENT_ID=$(json_get "$out" '.TransitGatewayVpcAttachment.TransitGatewayAttachmentId')
+    out=$(aws_cmd ec2 describe-transit-gateways --transit-gateway-ids "$TRANSIT_GATEWAY_ID")
+    local default_rtb
+    default_rtb=$(json_get "$out" '.TransitGateways[0].Options.AssociationDefaultRouteTableId')
+
+    run aws_cmd ec2 create-transit-gateway-route-table --transit-gateway-id "$TRANSIT_GATEWAY_ID" \
+        --tag-specifications 'ResourceType=transit-gateway-route-table,Tags=[{Key=Name,Value=bats-rtb}]'
+    assert_success
+    TGW_ROUTE_TABLE_ID=$(json_get "$output" '.TransitGatewayRouteTable.TransitGatewayRouteTableId')
+    [ "$(json_get "$output" '.TransitGatewayRouteTable.State')" = "available" ]
+    [ "$(json_get "$output" '.TransitGatewayRouteTable.DefaultAssociationRouteTable')" = "false" ]
+
+    # The attachment starts on the gateway's default table, so a second association is refused.
+    run aws_cmd ec2 associate-transit-gateway-route-table \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --transit-gateway-attachment-id "$TGW_ATTACHMENT_ID"
+    assert_failure
+    assert_output --partial "Resource.AlreadyAssociated"
+
+    run aws_cmd ec2 disassociate-transit-gateway-route-table \
+        --transit-gateway-route-table-id "$default_rtb" \
+        --transit-gateway-attachment-id "$TGW_ATTACHMENT_ID"
+    assert_success
+    [ "$(json_get "$output" '.Association.State')" = "disassociating" ]
+
+    run aws_cmd ec2 associate-transit-gateway-route-table \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --transit-gateway-attachment-id "$TGW_ATTACHMENT_ID"
+    assert_success
+    [ "$(json_get "$output" '.Association.State')" = "associating" ]
+
+    run aws_cmd ec2 get-transit-gateway-route-table-associations \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID"
+    assert_success
+    [ "$(json_get "$output" '.Associations[0].TransitGatewayAttachmentId')" = "$TGW_ATTACHMENT_ID" ]
+    [ "$(json_get "$output" '.Associations[0].ResourceType')" = "vpc" ]
+}
+
+@test "EC2: propagation produces a route for the attached VPC" {
+    create_attachment_fixture
+    local out
+    out=$(aws_cmd ec2 create-transit-gateway-vpc-attachment --transit-gateway-id "$TRANSIT_GATEWAY_ID" \
+        --vpc-id "$TGW_VPC_ID" --subnet-ids "$TGW_SUBNET_ID")
+    TGW_ATTACHMENT_ID=$(json_get "$out" '.TransitGatewayVpcAttachment.TransitGatewayAttachmentId')
+    out=$(aws_cmd ec2 create-transit-gateway-route-table --transit-gateway-id "$TRANSIT_GATEWAY_ID")
+    TGW_ROUTE_TABLE_ID=$(json_get "$out" '.TransitGatewayRouteTable.TransitGatewayRouteTableId')
+
+    run aws_cmd ec2 enable-transit-gateway-route-table-propagation \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --transit-gateway-attachment-id "$TGW_ATTACHMENT_ID"
+    assert_success
+    [ "$(json_get "$output" '.Propagation.State')" = "enabled" ]
+
+    run aws_cmd ec2 get-transit-gateway-route-table-propagations \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID"
+    assert_success
+    [ "$(json_get "$output" '.TransitGatewayRouteTablePropagations[0].State')" = "enabled" ]
+
+    run aws_cmd ec2 search-transit-gateway-routes \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --filters 'Name=type,Values=propagated'
+    assert_success
+    [ "$(json_get "$output" '.Routes[0].DestinationCidrBlock')" = "10.80.0.0/16" ]
+    [ "$(json_get "$output" '.Routes[0].Type')" = "propagated" ]
+    [ "$(json_get "$output" '.Routes[0].State')" = "active" ]
+
+    run aws_cmd ec2 enable-transit-gateway-route-table-propagation \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --transit-gateway-attachment-id "$TGW_ATTACHMENT_ID"
+    assert_failure
+    assert_output --partial "TransitGatewayRouteTablePropagation.Duplicate"
+}
+
+@test "EC2: static and blackhole transit gateway routes" {
+    create_attachment_fixture
+    local out
+    out=$(aws_cmd ec2 create-transit-gateway-vpc-attachment --transit-gateway-id "$TRANSIT_GATEWAY_ID" \
+        --vpc-id "$TGW_VPC_ID" --subnet-ids "$TGW_SUBNET_ID")
+    TGW_ATTACHMENT_ID=$(json_get "$out" '.TransitGatewayVpcAttachment.TransitGatewayAttachmentId')
+    out=$(aws_cmd ec2 create-transit-gateway-route-table --transit-gateway-id "$TRANSIT_GATEWAY_ID")
+    TGW_ROUTE_TABLE_ID=$(json_get "$out" '.TransitGatewayRouteTable.TransitGatewayRouteTableId')
+
+    run aws_cmd ec2 create-transit-gateway-route \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --destination-cidr-block 10.60.0.0/16 \
+        --transit-gateway-attachment-id "$TGW_ATTACHMENT_ID"
+    assert_success
+    [ "$(json_get "$output" '.Route.Type')" = "static" ]
+    [ "$(json_get "$output" '.Route.State')" = "active" ]
+    [ "$(json_get "$output" '.Route.TransitGatewayAttachments[0].TransitGatewayAttachmentId')" = "$TGW_ATTACHMENT_ID" ]
+
+    run aws_cmd ec2 create-transit-gateway-route \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --destination-cidr-block 10.61.0.0/16 --blackhole
+    assert_success
+    [ "$(json_get "$output" '.Route.State')" = "blackhole" ]
+    # A blackhole carries no attachment, so the key is absent rather than empty.
+    count=$(json_get "$output" '.Route.TransitGatewayAttachments // [] | length')
+    [ "$count" = "0" ]
+
+    run aws_cmd ec2 search-transit-gateway-routes \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --filters 'Name=type,Values=static'
+    assert_success
+    count=$(json_get "$output" '.Routes | length')
+    [ "$count" = "2" ]
+
+    run aws_cmd ec2 delete-transit-gateway-route \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --destination-cidr-block 10.61.0.0/16
+    assert_success
+    [ "$(json_get "$output" '.Route.State')" = "deleted" ]
 }

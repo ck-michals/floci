@@ -99,6 +99,26 @@ public class Ec2QueryHandler {
                         handleModifyTransitGatewayVpcAttachment(params, region);
                 case "DeleteTransitGatewayVpcAttachment" ->
                         handleDeleteTransitGatewayVpcAttachment(params, region);
+                // Transit Gateway route tables, associations, propagations and routes
+                case "CreateTransitGatewayRouteTable" -> handleCreateTransitGatewayRouteTable(params, region);
+                case "DescribeTransitGatewayRouteTables" ->
+                        handleDescribeTransitGatewayRouteTables(params, region);
+                case "DeleteTransitGatewayRouteTable" -> handleDeleteTransitGatewayRouteTable(params, region);
+                case "AssociateTransitGatewayRouteTable" ->
+                        handleAssociateTransitGatewayRouteTable(params, region);
+                case "DisassociateTransitGatewayRouteTable" ->
+                        handleDisassociateTransitGatewayRouteTable(params, region);
+                case "GetTransitGatewayRouteTableAssociations" ->
+                        handleGetTransitGatewayRouteTableAssociations(params, region);
+                case "EnableTransitGatewayRouteTablePropagation" ->
+                        handleEnableTransitGatewayRouteTablePropagation(params, region);
+                case "DisableTransitGatewayRouteTablePropagation" ->
+                        handleDisableTransitGatewayRouteTablePropagation(params, region);
+                case "GetTransitGatewayRouteTablePropagations" ->
+                        handleGetTransitGatewayRouteTablePropagations(params, region);
+                case "CreateTransitGatewayRoute" -> handleCreateTransitGatewayRoute(params, region);
+                case "DeleteTransitGatewayRoute" -> handleDeleteTransitGatewayRoute(params, region);
+                case "SearchTransitGatewayRoutes" -> handleSearchTransitGatewayRoutes(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -1379,6 +1399,220 @@ public class Ec2QueryHandler {
         options.setIpv6Support(p.getFirst("Options.Ipv6Support"));
         options.setApplianceModeSupport(p.getFirst("Options.ApplianceModeSupport"));
         return options;
+    }
+
+    private Response handleCreateTransitGatewayRouteTable(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRouteTable routeTable = service.createTransitGatewayRouteTable(
+                region, p.getFirst("TransitGatewayId"),
+                parseTagsForResource(p, "transit-gateway-route-table"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateTransitGatewayRouteTableResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayRouteTable").raw(routeTableXml(routeTable, true))
+                .end("transitGatewayRouteTable")
+                .end("CreateTransitGatewayRouteTableResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeTransitGatewayRouteTables(MultivaluedMap<String, String> p, String region) {
+        List<TransitGatewayRouteTable> routeTables = service.describeTransitGatewayRouteTables(
+                region, getList(p, "TransitGatewayRouteTableIds"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTransitGatewayRouteTablesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayRouteTables");
+        for (TransitGatewayRouteTable routeTable : routeTables) {
+            xml.start("item").raw(routeTableXml(routeTable, true)).end("item");
+        }
+        xml.end("transitGatewayRouteTables").end("DescribeTransitGatewayRouteTablesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteTransitGatewayRouteTable(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRouteTable routeTable = service.deleteTransitGatewayRouteTable(
+                region, p.getFirst("TransitGatewayRouteTableId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteTransitGatewayRouteTableResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayRouteTable").raw(routeTableXml(routeTable, false))
+                .end("transitGatewayRouteTable")
+                .end("DeleteTransitGatewayRouteTableResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleAssociateTransitGatewayRouteTable(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayVpcAttachment attachment = service.associateTransitGatewayRouteTable(
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"));
+        // Verified live: the call reports the transitional state even though the association is
+        // already recorded.
+        return xmlResponse(new XmlBuilder()
+                .start("AssociateTransitGatewayRouteTableResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("association").raw(associationXml(attachment, p.getFirst("TransitGatewayRouteTableId"),
+                        "associating", true)).end("association")
+                .end("AssociateTransitGatewayRouteTableResponse").build());
+    }
+
+    private Response handleDisassociateTransitGatewayRouteTable(MultivaluedMap<String, String> p, String region) {
+        String routeTableId = p.getFirst("TransitGatewayRouteTableId");
+        TransitGatewayVpcAttachment attachment = service.disassociateTransitGatewayRouteTable(
+                region, routeTableId, p.getFirst("TransitGatewayAttachmentId"));
+        return xmlResponse(new XmlBuilder()
+                .start("DisassociateTransitGatewayRouteTableResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("association").raw(associationXml(attachment, routeTableId, "disassociating", true))
+                .end("association")
+                .end("DisassociateTransitGatewayRouteTableResponse").build());
+    }
+
+    private Response handleGetTransitGatewayRouteTableAssociations(
+            MultivaluedMap<String, String> p, String region) {
+        String routeTableId = p.getFirst("TransitGatewayRouteTableId");
+        List<TransitGatewayVpcAttachment> associated = service.associationsOf(region, routeTableId);
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetTransitGatewayRouteTableAssociationsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("associations");
+        for (TransitGatewayVpcAttachment attachment : associated) {
+            // The listing form carries no route table id: the caller named it in the request.
+            xml.start("item").raw(associationXml(attachment, routeTableId, attachment.getAssociationState(), false))
+                    .end("item");
+        }
+        xml.end("associations").end("GetTransitGatewayRouteTableAssociationsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleEnableTransitGatewayRouteTablePropagation(
+            MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRouteTablePropagation propagation = service.enableTransitGatewayRouteTablePropagation(
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"));
+        return xmlResponse(new XmlBuilder()
+                .start("EnableTransitGatewayRouteTablePropagationResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("propagation").raw(propagationXml(propagation, true)).end("propagation")
+                .end("EnableTransitGatewayRouteTablePropagationResponse").build());
+    }
+
+    private Response handleDisableTransitGatewayRouteTablePropagation(
+            MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRouteTablePropagation propagation = service.disableTransitGatewayRouteTablePropagation(
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"));
+        return xmlResponse(new XmlBuilder()
+                .start("DisableTransitGatewayRouteTablePropagationResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("propagation").raw(propagationXml(propagation, true)).end("propagation")
+                .end("DisableTransitGatewayRouteTablePropagationResponse").build());
+    }
+
+    private Response handleGetTransitGatewayRouteTablePropagations(
+            MultivaluedMap<String, String> p, String region) {
+        List<TransitGatewayRouteTablePropagation> propagations =
+                service.propagationsOf(region, p.getFirst("TransitGatewayRouteTableId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetTransitGatewayRouteTablePropagationsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayRouteTablePropagations");
+        for (TransitGatewayRouteTablePropagation propagation : propagations) {
+            // The listing form drops the route table id that enable and disable both carry.
+            xml.start("item").raw(propagationXml(propagation, false)).end("item");
+        }
+        xml.end("transitGatewayRouteTablePropagations")
+                .end("GetTransitGatewayRouteTablePropagationsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateTransitGatewayRoute(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRoute route = service.createTransitGatewayRoute(
+                region,
+                p.getFirst("TransitGatewayRouteTableId"),
+                p.getFirst("DestinationCidrBlock"),
+                p.getFirst("TransitGatewayAttachmentId"),
+                Boolean.parseBoolean(p.getFirst("Blackhole")));
+        return xmlResponse(new XmlBuilder()
+                .start("CreateTransitGatewayRouteResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("route").raw(routeXml(route)).end("route")
+                .end("CreateTransitGatewayRouteResponse").build());
+    }
+
+    private Response handleDeleteTransitGatewayRoute(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRoute route = service.deleteTransitGatewayRoute(
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("DestinationCidrBlock"));
+        return xmlResponse(new XmlBuilder()
+                .start("DeleteTransitGatewayRouteResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("route").raw(routeXml(route)).end("route")
+                .end("DeleteTransitGatewayRouteResponse").build());
+    }
+
+    private Response handleSearchTransitGatewayRoutes(MultivaluedMap<String, String> p, String region) {
+        List<TransitGatewayRoute> routes = service.searchTransitGatewayRoutes(
+                region, p.getFirst("TransitGatewayRouteTableId"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("SearchTransitGatewayRoutesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("routeSet");
+        for (TransitGatewayRoute route : routes) {
+            xml.start("item").raw(routeXml(route)).end("item");
+        }
+        xml.end("routeSet")
+                .elem("additionalRoutesAvailable", "false")
+                .end("SearchTransitGatewayRoutesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private String routeTableXml(TransitGatewayRouteTable routeTable, boolean includeTags) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("transitGatewayRouteTableId", routeTable.getTransitGatewayRouteTableId())
+                .elem("transitGatewayId", routeTable.getTransitGatewayId())
+                .elem("state", routeTable.getState())
+                .elem("defaultAssociationRouteTable", String.valueOf(routeTable.isDefaultAssociationRouteTable()))
+                .elem("defaultPropagationRouteTable", String.valueOf(routeTable.isDefaultPropagationRouteTable()))
+                .elem("creationTime", routeTable.getCreationTime());
+        if (includeTags) {
+            xml.raw(tagSetXml(routeTable.getTags()));
+        }
+        return xml.build();
+    }
+
+    private String associationXml(TransitGatewayVpcAttachment attachment, String routeTableId,
+                                  String state, boolean includeRouteTableId) {
+        XmlBuilder xml = new XmlBuilder();
+        if (includeRouteTableId) {
+            xml.elem("transitGatewayRouteTableId", routeTableId);
+        }
+        return xml.elem("transitGatewayAttachmentId", attachment.getTransitGatewayAttachmentId())
+                .elem("resourceId", attachment.getVpcId())
+                .elem("resourceType", "vpc")
+                .elem("state", state)
+                .build();
+    }
+
+    private String propagationXml(TransitGatewayRouteTablePropagation propagation, boolean includeRouteTableId) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("transitGatewayAttachmentId", propagation.getTransitGatewayAttachmentId())
+                .elem("resourceId", propagation.getResourceId())
+                .elem("resourceType", propagation.getResourceType());
+        if (includeRouteTableId) {
+            xml.elem("transitGatewayRouteTableId", propagation.getTransitGatewayRouteTableId());
+        }
+        return xml.elem("state", propagation.getState()).build();
+    }
+
+    private String routeXml(TransitGatewayRoute route) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("destinationCidrBlock", route.getDestinationCidrBlock());
+        // A blackhole route, and a deleted one, carry no attachment at all.
+        if (route.getTransitGatewayAttachmentId() != null) {
+            xml.start("transitGatewayAttachments").start("item")
+                    .elem("resourceId", route.getResourceId())
+                    .elem("transitGatewayAttachmentId", route.getTransitGatewayAttachmentId())
+                    .elem("resourceType", route.getResourceType())
+                    .end("item").end("transitGatewayAttachments");
+        }
+        return xml.elem("type", route.getType())
+                .elem("state", route.getState())
+                .build();
     }
 
     private String vpcAttachmentXml(TransitGatewayVpcAttachment attachment, boolean includeSubnets,

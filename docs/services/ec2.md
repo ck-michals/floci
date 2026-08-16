@@ -372,6 +372,48 @@ trimmed the way AWS trims them: modify omits the `tagSet`, and delete omits both
 the subnets. `Ipv6Support` is accepted without checking that the subnets carry IPv6 CIDRs, which
 real AWS rejects; Floci does not model subnet IPv6 allocation.
 
+### Transit Gateway Route Tables
+
+| Action | Description |
+|--------|-------------|
+| CreateTransitGatewayRouteTable | Creates a route table on a transit gateway. |
+| DescribeTransitGatewayRouteTables | Lists or returns stored transit gateway route tables. |
+| DeleteTransitGatewayRouteTable | Deletes a route table, along with its propagations and static routes. |
+| AssociateTransitGatewayRouteTable | Associates an attachment with a route table. |
+| DisassociateTransitGatewayRouteTable | Removes an attachment's association. |
+| GetTransitGatewayRouteTableAssociations | Lists the attachments associated with a route table. |
+| EnableTransitGatewayRouteTablePropagation | Propagates an attachment's routes into a route table. |
+| DisableTransitGatewayRouteTablePropagation | Stops an attachment propagating into a route table. |
+| GetTransitGatewayRouteTablePropagations | Lists the propagations into a route table. |
+| CreateTransitGatewayRoute | Adds a static or blackhole route to a route table. |
+| DeleteTransitGatewayRoute | Removes a static route. |
+| SearchTransitGatewayRoutes | Returns a route table's routes, static and propagated, filtered. |
+
+A route table asked for by name is never a default one; only the table a gateway mints for itself
+carries `defaultAssociationRouteTable` or `defaultPropagationRouteTable`. Deleting a route table is
+refused with `IncorrectState` while it is a gateway's default association table, and again while
+attachments are still associated with it; the two cases carry different messages. Once it does go,
+its propagations and static routes go with it.
+
+An attachment is associated with exactly one route table at a time, so associating a second time
+returns `Resource.AlreadyAssociated` rather than moving it — disassociate first. Association is
+recorded on the attachment itself, which is why `GetTransitGatewayRouteTableAssociations` reports
+the attachment's VPC as the associated resource.
+
+Propagation is separate: one attachment may propagate into several route tables. Enabling twice
+returns `TransitGatewayRouteTablePropagation.Duplicate`. Unlike association, which reports
+`associating` and `disassociating`, propagation reports the settled `enabled` or `disabled` at
+once — that is what the live API does rather than a shortcut taken here.
+
+`SearchTransitGatewayRoutes` serves both kinds of route. Static routes are stored as written; a
+blackhole is a static route in the `blackhole` state rather than a type of its own, and carries no
+attachment. Propagated routes are derived when searched, from each enabled propagation joined to
+the attached VPC's CIDR blocks, so a VPC's CIDRs changing cannot leave a stale route behind. A
+route table's own listings drop the route table id that the mutating calls include, matching AWS.
+
+Route table ids follow the live API's own inconsistency: an id that does not exist is
+`InvalidRouteTableID.NotFound`, while one of the wrong shape is `InvalidRouteTableId.Malformed`.
+
 ### NAT Gateways
 
 | Action | Description |
