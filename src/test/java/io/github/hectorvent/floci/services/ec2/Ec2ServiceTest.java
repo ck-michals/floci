@@ -1734,6 +1734,75 @@ class Ec2ServiceTest {
     }
 
     /**
+     * One attachment per VPC is a uniqueness rule, so the duplicate check and the write have to be
+     * one step. Reproduces the race: with the two unsynchronized, concurrent creates for the same
+     * VPC both find nothing and both store.
+     */
+    @Test
+    void concurrentAttachmentsForOneVpcLeaveExactlyOne() throws Exception {
+        for (int trial = 0; trial < 40; trial++) {
+            Ec2Service service = prefixListService();
+            String[] fixture = attachmentFixture(service);
+            int threads = 8;
+            java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.ExecutorService pool =
+                    java.util.concurrent.Executors.newFixedThreadPool(threads);
+            List<String> created = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+            List<String> errors = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
+            for (int i = 0; i < threads; i++) {
+                pool.submit(() -> {
+                    try {
+                        start.await();
+                        created.add(service.createTransitGatewayVpcAttachment("us-east-1", fixture[0],
+                                fixture[1], List.of(fixture[2]), null, List.of())
+                                .getTransitGatewayAttachmentId());
+                    } catch (AwsException expected) {
+                        errors.add(expected.getErrorCode());
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+            }
+            start.countDown();
+            pool.shutdown();
+            assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+
+            assertEquals(1, created.size(), "trial " + trial + ": exactly one create may win");
+            assertEquals(threads - 1, errors.size(), "every loser is told the VPC is already attached");
+            assertTrue(errors.stream().allMatch("DuplicateTransitGatewayAttachment"::equals), errors.toString());
+            assertEquals(1, service.describeTransitGatewayVpcAttachments("us-east-1", List.of(), Map.of()).size(),
+                    "and only one attachment is stored");
+        }
+    }
+
+    /**
+     * Verified on a live account: an attached VPC or subnet cannot be deleted out from under the
+     * attachment, and both report the same {@code DependencyViolation}. Without this the stored
+     * attachment would go on naming resources that no longer exist, and a later modify would fail
+     * on a subnet the caller never touched.
+     */
+    @Test
+    void anAttachedVpcOrSubnetCannotBeDeleted() {
+        Ec2Service service = prefixListService();
+        String[] fixture = attachmentFixture(service);
+        String attachmentId = service.createTransitGatewayVpcAttachment("us-east-1", fixture[0],
+                fixture[1], List.of(fixture[2]), null, List.of()).getTransitGatewayAttachmentId();
+
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteSubnet("us-east-1", fixture[2])).getErrorCode());
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteVpc("us-east-1", fixture[1])).getErrorCode());
+
+        // A subnet of the same VPC that the attachment does not use is free to go.
+        service.deleteSubnet("us-east-1", fixture[3]);
+
+        service.deleteTransitGatewayVpcAttachment("us-east-1", attachmentId);
+        service.deleteSubnet("us-east-1", fixture[2]);
+        service.deleteVpc("us-east-1", fixture[1]);
+    }
+
+    /**
      * An attachment must be created with at least one subnet. Modify refuses to leave one without
      * any, so creation must not be a back door into the state modify forbids.
      */

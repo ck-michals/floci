@@ -1283,19 +1283,29 @@ public class Ec2Service implements ContainerTeardown {
                     "The request must contain the parameter SubnetIds.", 400);
         }
         requireAttachableSubnets(region, vpcId, subnetIds, List.of());
-        boolean alreadyAttached = transitGatewayVpcAttachments.scan(k -> true).stream()
-                .filter(existing -> region.equals(existing.getRegion()))
-                .filter(existing -> transitGatewayId.equals(existing.getTransitGatewayId()))
-                .anyMatch(existing -> vpcId.equals(existing.getVpcId()));
-        if (alreadyAttached) {
-            throw new AwsException("DuplicateTransitGatewayAttachment",
-                    transitGatewayId + " has non-deleted Transit Gateway Attachments with same VPC ID.", 400);
+        // One attachment per VPC is a uniqueness rule, so the check and the write share the
+        // gateway's lock: racing creates for the same VPC would otherwise both find nothing and
+        // both store, leaving the duplicate the API promises never to have.
+        synchronized (lockFor(key(region, transitGatewayId))) {
+            boolean alreadyAttached = transitGatewayVpcAttachments.scan(k -> true).stream()
+                    .filter(existing -> region.equals(existing.getRegion()))
+                    .filter(existing -> transitGatewayId.equals(existing.getTransitGatewayId()))
+                    .anyMatch(existing -> vpcId.equals(existing.getVpcId()));
+            if (alreadyAttached) {
+                throw new AwsException("DuplicateTransitGatewayAttachment",
+                        transitGatewayId + " has non-deleted Transit Gateway Attachments with same VPC ID.", 400);
+            }
+            return storeNewAttachment(region, gateway, vpcId, subnetIds, requested, attachmentTags);
         }
+    }
 
+    private TransitGatewayVpcAttachment storeNewAttachment(
+            String region, TransitGateway gateway, String vpcId, List<String> subnetIds,
+            TransitGatewayVpcAttachmentOptions requested, List<Tag> attachmentTags) {
         TransitGatewayVpcAttachment attachment = new TransitGatewayVpcAttachment();
         String attachmentId = "tgw-attach-" + randomHex(17);
         attachment.setTransitGatewayAttachmentId(attachmentId);
-        attachment.setTransitGatewayId(transitGatewayId);
+        attachment.setTransitGatewayId(gateway.getTransitGatewayId());
         attachment.setVpcId(vpcId);
         attachment.setVpcOwnerId(accountId);
         attachment.setTransitGatewayOwnerId(gateway.getOwnerId());
@@ -1999,6 +2009,9 @@ public class Ec2Service implements ContainerTeardown {
     public void deleteVpc(String region, String vpcId) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
+        requireNoTransitGatewayAttachment(region,
+                attachment -> vpcId.equals(attachment.getVpcId()),
+                "The vpc '" + vpcId + "' has dependencies and cannot be deleted.");
 
         vpcs.delete(key(region, vpcId));
     }
@@ -2225,7 +2238,25 @@ public class Ec2Service implements ContainerTeardown {
         if (subnets.get(key(region, subnetId)).isEmpty()) {
             throw new AwsException("InvalidSubnetID.NotFound", "The subnet ID '" + subnetId + "' does not exist", 400);
         }
+        requireNoTransitGatewayAttachment(region,
+                attachment -> attachment.getSubnetIds().contains(subnetId),
+                "The subnet '" + subnetId + "' has dependencies and cannot be deleted.");
         subnets.delete(key(region, subnetId));
+    }
+
+    /**
+     * A VPC or subnet carrying a transit gateway attachment cannot be deleted out from under it.
+     * Verified on a live account: both report {@code DependencyViolation} with the same wording,
+     * rather than leaving the attachment pointing at something that no longer exists.
+     */
+    private void requireNoTransitGatewayAttachment(
+            String region, java.util.function.Predicate<TransitGatewayVpcAttachment> dependsOnIt, String message) {
+        boolean attached = transitGatewayVpcAttachments.scan(k -> true).stream()
+                .filter(attachment -> region.equals(attachment.getRegion()))
+                .anyMatch(dependsOnIt);
+        if (attached) {
+            throw new AwsException("DependencyViolation", message, 400);
+        }
     }
 
     public void modifySubnetAttribute(String region, String subnetId, String attribute, String value) {
