@@ -76,6 +76,8 @@ import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.TransitGateway;
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayOptions;
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTable;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachment;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayVpcAttachmentOptions;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
@@ -99,6 +101,8 @@ public class Ec2Service implements ContainerTeardown {
     // The ASN AWS assigns when CreateTransitGateway omits Options.AmazonSideAsn.
     private static final long DEFAULT_AMAZON_SIDE_ASN = 64512L;
     private static final Pattern TRANSIT_GATEWAY_ID_PATTERN = Pattern.compile("^tgw-[0-9a-f]{8}([0-9a-f]{9})?$");
+    private static final Pattern TRANSIT_GATEWAY_ATTACHMENT_ID_PATTERN =
+            Pattern.compile("^tgw-attach-[0-9a-f]{8}([0-9a-f]{9})?$");
 
     private final String accountId;
     private final EmulatorConfig config;
@@ -131,6 +135,7 @@ public class Ec2Service implements ContainerTeardown {
     private final StorageBackend<String, ManagedPrefixList> managedPrefixLists;
     private final StorageBackend<String, TransitGateway> transitGateways;
     private final StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables;
+    private final StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -164,7 +169,9 @@ public class Ec2Service implements ContainerTeardown {
                 storageFactory.create("ec2", "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}),
                 storageFactory.create("ec2", "ec2-transit-gateways.json", new TypeReference<Map<String, TransitGateway>>() {}),
                 storageFactory.create("ec2", "ec2-transit-gateway-route-tables.json",
-                        new TypeReference<Map<String, TransitGatewayRouteTable>>() {}));
+                        new TypeReference<Map<String, TransitGatewayRouteTable>>() {}),
+                storageFactory.create("ec2", "ec2-transit-gateway-vpc-attachments.json",
+                        new TypeReference<Map<String, TransitGatewayVpcAttachment>>() {}));
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -195,7 +202,7 @@ public class Ec2Service implements ContainerTeardown {
                 vpcs, subnets, securityGroups, securityGroupRules, internetGateways, routeTables, keyPairs,
                 addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
                 natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
-                new InMemoryStorage<>(), new InMemoryStorage<>());
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
     }
 
     // Package-private for hermetic tests, transit-gateway-aware. The shorter overload above keeps its
@@ -224,7 +231,8 @@ public class Ec2Service implements ContainerTeardown {
                StorageBackend<String, ManagedPrefixList> managedPrefixLists,
                StorageBackend<String, List<Tag>> tags,
                StorageBackend<String, TransitGateway> transitGateways,
-               StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables) {
+               StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables,
+               StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments) {
         this.accountId = config.defaultAccountId();
         this.config = config;
         this.containerManager = containerManager;
@@ -253,6 +261,7 @@ public class Ec2Service implements ContainerTeardown {
         this.tags = tags;
         this.transitGateways = transitGateways;
         this.transitGatewayRouteTables = transitGatewayRouteTables;
+        this.transitGatewayVpcAttachments = transitGatewayVpcAttachments;
     }
 
     @PostConstruct
@@ -1210,6 +1219,16 @@ public class Ec2Service implements ContainerTeardown {
     public TransitGateway deleteTransitGateway(String region, String transitGatewayId) {
         synchronized (lockFor(key(region, transitGatewayId))) {
             TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
+            // AWS refuses while anything is still attached, naming the attachments in the message.
+            List<String> attached = transitGatewayVpcAttachments.scan(k -> true).stream()
+                    .filter(attachment -> region.equals(attachment.getRegion()))
+                    .filter(attachment -> transitGatewayId.equals(attachment.getTransitGatewayId()))
+                    .map(TransitGatewayVpcAttachment::getTransitGatewayAttachmentId)
+                    .toList();
+            if (!attached.isEmpty()) {
+                throw new AwsException("IncorrectState", transitGatewayId
+                        + " has non-deleted VPC Attachments: " + String.join(", ", attached) + ".", 400);
+            }
             transitGatewayRouteTables.scan(k -> true).stream()
                     .filter(routeTable -> region.equals(routeTable.getRegion()))
                     .filter(routeTable -> transitGatewayId.equals(routeTable.getTransitGatewayId()))
@@ -1239,6 +1258,201 @@ public class Ec2Service implements ContainerTeardown {
             throw new AwsException("InvalidTransitGatewayID.Malformed",
                     "Invalid Transit Gateway id " + transitGatewayId + ".", 400);
         }
+    }
+
+    // ─── Transit Gateway VPC Attachments ───────────────────────────────────────
+
+    /**
+     * Attaches a VPC to a transit gateway. The option defaults are the attachment's own and not
+     * the gateway's: verified against a live account, {@code securityGroupReferencingSupport} is
+     * enabled here where it is disabled on the gateway that owns the attachment.
+     *
+     * <p>An attachment is associated with the gateway's default route table only when the gateway
+     * asks for that, so a gateway created with {@code DefaultRouteTableAssociation} disabled
+     * produces an attachment carrying no association at all.
+     */
+    public TransitGatewayVpcAttachment createTransitGatewayVpcAttachment(
+            String region, String transitGatewayId, String vpcId, List<String> subnetIds,
+            TransitGatewayVpcAttachmentOptions requested, List<Tag> attachmentTags) {
+        TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
+        getRequiredVpc(region, vpcId);
+        // SubnetIds is required on the request, and modify refuses to leave an attachment without
+        // any, so creation must not be a way to produce the subnet-less attachment modify forbids.
+        if (subnetIds == null || subnetIds.isEmpty()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter SubnetIds.", 400);
+        }
+        requireAttachableSubnets(region, vpcId, subnetIds, List.of());
+        boolean alreadyAttached = transitGatewayVpcAttachments.scan(k -> true).stream()
+                .filter(existing -> region.equals(existing.getRegion()))
+                .filter(existing -> transitGatewayId.equals(existing.getTransitGatewayId()))
+                .anyMatch(existing -> vpcId.equals(existing.getVpcId()));
+        if (alreadyAttached) {
+            throw new AwsException("DuplicateTransitGatewayAttachment",
+                    transitGatewayId + " has non-deleted Transit Gateway Attachments with same VPC ID.", 400);
+        }
+
+        TransitGatewayVpcAttachment attachment = new TransitGatewayVpcAttachment();
+        String attachmentId = "tgw-attach-" + randomHex(17);
+        attachment.setTransitGatewayAttachmentId(attachmentId);
+        attachment.setTransitGatewayId(transitGatewayId);
+        attachment.setVpcId(vpcId);
+        attachment.setVpcOwnerId(accountId);
+        attachment.setTransitGatewayOwnerId(gateway.getOwnerId());
+        // AWS reports pending and settles on available; nothing is slow locally, the same
+        // compression createTransitGateway applies.
+        attachment.setState("available");
+        attachment.setSubnetIds(new ArrayList<>(subnetIds));
+        attachment.setCreationTime(ISO_FMT.format(Instant.now()));
+        attachment.setRegion(region);
+        attachment.setOptions(resolveAttachmentOptions(requested));
+        // Both halves together: an association state without a table would be a shape AWS never
+        // serves, and the gateway's own validation keeps the pair in step.
+        if ("enable".equals(gateway.getOptions().getDefaultRouteTableAssociation())
+                && gateway.getOptions().getAssociationDefaultRouteTableId() != null) {
+            attachment.setAssociationRouteTableId(gateway.getOptions().getAssociationDefaultRouteTableId());
+            attachment.setAssociationState("associated");
+        }
+        if (attachmentTags != null && !attachmentTags.isEmpty()) {
+            attachment.setTags(new ArrayList<>(attachmentTags));
+            tags.put(attachmentId, new ArrayList<>(attachmentTags));
+        }
+        transitGatewayVpcAttachments.put(key(region, attachmentId), attachment);
+        return attachment;
+    }
+
+    private TransitGatewayVpcAttachmentOptions resolveAttachmentOptions(
+            TransitGatewayVpcAttachmentOptions requested) {
+        TransitGatewayVpcAttachmentOptions options = new TransitGatewayVpcAttachmentOptions();
+        options.setDnsSupport("enable");
+        options.setSecurityGroupReferencingSupport("enable");
+        options.setIpv6Support("disable");
+        options.setApplianceModeSupport("disable");
+        applyAttachmentOptionChanges(options, requested);
+        return options;
+    }
+
+    /**
+     * Every subnet has to exist in the VPC being attached, and no two may share an availability
+     * zone. A subnet belonging to another VPC is reported missing rather than mismatched, which is
+     * what the live API does.
+     */
+    private void requireAttachableSubnets(String region, String vpcId, List<String> subnetIds,
+                                          List<String> alreadyAttached) {
+        List<String> zones = new ArrayList<>();
+        for (String subnetId : alreadyAttached) {
+            subnets.get(key(region, subnetId)).ifPresent(subnet -> zones.add(subnet.getAvailabilityZone()));
+        }
+        for (String subnetId : subnetIds) {
+            Subnet subnet = subnets.get(key(region, subnetId)).orElse(null);
+            if (subnet == null || !vpcId.equals(subnet.getVpcId())) {
+                throw new AwsException("InvalidSubnetID.NotFound",
+                        "Subnet " + subnetId + " was deleted or does not exist.", 400);
+            }
+            if (zones.contains(subnet.getAvailabilityZone())) {
+                throw new AwsException("DuplicateSubnetsInSameZone", "Duplicate Subnets for same AZ", 400);
+            }
+            zones.add(subnet.getAvailabilityZone());
+        }
+    }
+
+    public List<TransitGatewayVpcAttachment> describeTransitGatewayVpcAttachments(
+            String region, List<String> attachmentIds, Map<String, List<String>> filters) {
+        attachmentIds.forEach(Ec2Service::requireWellFormedAttachmentId);
+        List<TransitGatewayVpcAttachment> all = transitGatewayVpcAttachments.scan(k -> true).stream()
+                .filter(attachment -> region.equals(attachment.getRegion()))
+                .collect(Collectors.toList());
+        for (String attachmentId : attachmentIds) {
+            if (all.stream().noneMatch(a -> a.getTransitGatewayAttachmentId().equals(attachmentId))) {
+                throw new AwsException("InvalidTransitGatewayAttachmentID.NotFound",
+                        "Transit Gateway Attachment " + attachmentId + " was deleted or does not exist.", 400);
+            }
+        }
+        return all.stream()
+                .filter(a -> attachmentIds.isEmpty() || attachmentIds.contains(a.getTransitGatewayAttachmentId()))
+                .filter(a -> matchesFilters(a, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public TransitGatewayVpcAttachment modifyTransitGatewayVpcAttachment(
+            String region, String attachmentId, List<String> addSubnetIds, List<String> removeSubnetIds,
+            TransitGatewayVpcAttachmentOptions changes) {
+        synchronized (lockFor(key(region, attachmentId))) {
+            TransitGatewayVpcAttachment attachment = getRequiredVpcAttachment(region, attachmentId);
+            List<String> subnetIds = new ArrayList<>(attachment.getSubnetIds());
+            if (removeSubnetIds != null) {
+                for (String subnetId : removeSubnetIds) {
+                    if (!subnetIds.remove(subnetId)) {
+                        throw new AwsException("InvalidSubnetID.NotFound",
+                                subnetId + " is not attached but supplied in RemoveSubnets", 400);
+                    }
+                }
+            }
+            if (addSubnetIds != null && !addSubnetIds.isEmpty()) {
+                requireAttachableSubnets(region, attachment.getVpcId(), addSubnetIds, subnetIds);
+                subnetIds.addAll(addSubnetIds);
+            }
+            // Removals are applied first, so an attachment cannot be left with nothing to attach
+            // through even when the same request adds subnets back.
+            if (subnetIds.isEmpty()) {
+                throw new AwsException("InsufficientSubnetsException", "Insufficient Subnets", 400);
+            }
+            attachment.setSubnetIds(subnetIds);
+            applyAttachmentOptionChanges(attachment.getOptions(), changes);
+            transitGatewayVpcAttachments.put(key(region, attachmentId), attachment);
+            return attachment;
+        }
+    }
+
+    private void applyAttachmentOptionChanges(TransitGatewayVpcAttachmentOptions options,
+                                              TransitGatewayVpcAttachmentOptions changes) {
+        if (changes == null) {
+            return;
+        }
+        if (changes.getDnsSupport() != null) {
+            options.setDnsSupport(changes.getDnsSupport());
+        }
+        if (changes.getSecurityGroupReferencingSupport() != null) {
+            options.setSecurityGroupReferencingSupport(changes.getSecurityGroupReferencingSupport());
+        }
+        if (changes.getIpv6Support() != null) {
+            options.setIpv6Support(changes.getIpv6Support());
+        }
+        if (changes.getApplianceModeSupport() != null) {
+            options.setApplianceModeSupport(changes.getApplianceModeSupport());
+        }
+    }
+
+    public TransitGatewayVpcAttachment deleteTransitGatewayVpcAttachment(String region, String attachmentId) {
+        synchronized (lockFor(key(region, attachmentId))) {
+            TransitGatewayVpcAttachment attachment = getRequiredVpcAttachment(region, attachmentId);
+            transitGatewayVpcAttachments.delete(key(region, attachmentId));
+            tags.delete(attachmentId);
+            attachment.setState("deleted");
+            return attachment;
+        }
+    }
+
+    /**
+     * Verified live: an id of the wrong shape is rejected before any lookup, and the message does
+     * not echo it back, unlike the transit gateway's equivalent.
+     */
+    private static void requireWellFormedAttachmentId(String attachmentId) {
+        if (!TRANSIT_GATEWAY_ATTACHMENT_ID_PATTERN.matcher(attachmentId).matches()) {
+            throw new AwsException("InvalidTransitGatewayAttachmentID.Malformed",
+                    "Invalid Transit Gateway Attachment id.", 400);
+        }
+    }
+
+    private TransitGatewayVpcAttachment getRequiredVpcAttachment(String region, String attachmentId) {
+        if (attachmentId == null || attachmentId.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter TransitGatewayAttachmentId.", 400);
+        }
+        requireWellFormedAttachmentId(attachmentId);
+        return transitGatewayVpcAttachments.get(key(region, attachmentId))
+                .orElseThrow(() -> new AwsException("InvalidTransitGatewayAttachmentID.NotFound",
+                        "Transit Gateway Attachment " + attachmentId + " was deleted or does not exist.", 400));
     }
 
     // ─── Instances ─────────────────────────────────────────────────────────────
@@ -3186,6 +3400,12 @@ public class Ec2Service implements ContainerTeardown {
         if (routeTable != null) {
             routeTable.setTags(new ArrayList<>(tagList));
             transitGatewayRouteTables.put(storeKey, routeTable);
+            return;
+        }
+        TransitGatewayVpcAttachment attachment = transitGatewayVpcAttachments.get(storeKey).orElse(null);
+        if (attachment != null) {
+            attachment.setTags(new ArrayList<>(tagList));
+            transitGatewayVpcAttachments.put(storeKey, attachment);
         }
     }
 
@@ -3264,7 +3484,10 @@ public class Ec2Service implements ContainerTeardown {
         if (resourceId.startsWith("pl-")) {
             return "prefix-list";
         }
-        // Checked before the gateway prefix, which it starts with.
+        // Both checked before the gateway prefix, which they start with.
+        if (resourceId.startsWith("tgw-attach-")) {
+            return "transit-gateway-attachment";
+        }
         if (resourceId.startsWith("tgw-rtb-")) {
             return "transit-gateway-route-table";
         }
@@ -3780,6 +4003,18 @@ public class Ec2Service implements ContainerTeardown {
                 default -> true;
             };
         }
+        if (resource instanceof TransitGatewayVpcAttachment attachment) {
+            return switch (filterName) {
+                case "transit-gateway-attachment-id" -> matchesValue(values, attachment.getTransitGatewayAttachmentId());
+                case "transit-gateway-id" -> matchesValue(values, attachment.getTransitGatewayId());
+                case "vpc-id" -> matchesValue(values, attachment.getVpcId());
+                case "vpc-owner-id" -> matchesValue(values, attachment.getVpcOwnerId());
+                case "state" -> matchesValue(values, attachment.getState());
+                case "resource-id" -> matchesValue(values, attachment.getVpcId());
+                case "resource-type" -> matchesValue(values, "vpc");
+                default -> true;
+            };
+        }
         if (resource instanceof TransitGateway gateway) {
             return switch (filterName) {
                 case "transit-gateway-id" -> matchesValue(values, gateway.getTransitGatewayId());
@@ -3928,6 +4163,7 @@ public class Ec2Service implements ContainerTeardown {
         if (resource instanceof SpotInstanceRequest sir) return sir.getTags();
         if (resource instanceof TransitGateway gateway) return gateway.getTags();
         if (resource instanceof TransitGatewayRouteTable routeTable) return routeTable.getTags();
+        if (resource instanceof TransitGatewayVpcAttachment attachment) return attachment.getTags();
         return Collections.emptyList();
     }
 

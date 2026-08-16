@@ -340,6 +340,38 @@ is slow, so callers see `available` and `deleted` immediately. `ModifyTransitGat
 `DeleteTransitGateway` echo the gateway without its `tagSet`, matching AWS; `CreateTransitGateway`
 and `DescribeTransitGateways` include it.
 
+### Transit Gateway VPC Attachments
+
+| Action | Description |
+|--------|-------------|
+| CreateTransitGatewayVpcAttachment | Attaches a VPC to a transit gateway through one subnet per availability zone. |
+| DescribeTransitGatewayVpcAttachments | Lists or returns VPC attachments with their subnets and options. |
+| DescribeTransitGatewayAttachments | Returns the same attachments in the resource-agnostic shape, including the route table association. |
+| ModifyTransitGatewayVpcAttachment | Adds or removes attachment subnets and updates its options. |
+| DeleteTransitGatewayVpcAttachment | Deletes a VPC attachment. |
+
+An attachment's option defaults are its own rather than the gateway's: `dnsSupport` and
+`securityGroupReferencingSupport` enabled, `ipv6Support` and `applianceModeSupport` disabled. Note
+that `securityGroupReferencingSupport` is enabled here while a transit gateway defaults it to
+disabled.
+
+The attachment is associated with the gateway's default route table only when the gateway carries
+`defaultRouteTableAssociation` enabled; a gateway created without it produces an attachment with no
+association. That association is reported by `DescribeTransitGatewayAttachments` alone — the
+VPC-specific describe does not carry it, and the resource-agnostic one carries neither the subnets
+nor the options in exchange.
+
+Subnets must belong to the VPC being attached and no two may share an availability zone; one from
+another VPC is reported as `InvalidSubnetID.NotFound` rather than as a mismatch. A VPC can be
+attached to a given gateway once, so a second attempt returns `DuplicateTransitGatewayAttachment`.
+Removing every subnet returns `InsufficientSubnetsException`, and a gateway with a live attachment
+cannot be deleted — `IncorrectState`, naming the attachments.
+
+As with the gateway itself, state is reported settled rather than transitional, and the echoes are
+trimmed the way AWS trims them: modify omits the `tagSet`, and delete omits both the `tagSet` and
+the subnets. `Ipv6Support` is accepted without checking that the subnets carry IPv6 CIDRs, which
+real AWS rejects; Floci does not model subnet IPv6 allocation.
+
 ### NAT Gateways
 
 | Action | Description |

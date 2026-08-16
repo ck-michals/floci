@@ -9,14 +9,23 @@ setup() {
     SG_SOURCE_ID=""
     SG_TARGET_ID=""
     TRANSIT_GATEWAY_ID=""
+    TGW_ATTACHMENT_ID=""
+    TGW_VPC_ID=""
 }
 
 teardown() {
     if [ -n "$PREFIX_LIST_ID" ]; then
         aws_cmd ec2 delete-managed-prefix-list --prefix-list-id "$PREFIX_LIST_ID" >/dev/null 2>&1 || true
     fi
+    if [ -n "$TGW_ATTACHMENT_ID" ]; then
+        aws_cmd ec2 delete-transit-gateway-vpc-attachment \
+            --transit-gateway-attachment-id "$TGW_ATTACHMENT_ID" >/dev/null 2>&1 || true
+    fi
     if [ -n "$TRANSIT_GATEWAY_ID" ]; then
         aws_cmd ec2 delete-transit-gateway --transit-gateway-id "$TRANSIT_GATEWAY_ID" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$TGW_VPC_ID" ]; then
+        aws_cmd ec2 delete-vpc --vpc-id "$TGW_VPC_ID" >/dev/null 2>&1 || true
     fi
     for sg in "$SG_TARGET_ID" "$SG_SOURCE_ID"; do
         if [ -n "$sg" ]; then
@@ -338,4 +347,97 @@ create_sg_pair() {
     run aws_cmd ec2 describe-transit-gateways --transit-gateway-ids tgw-0123456789abcdef0
     assert_failure
     assert_output --partial "InvalidTransitGatewayID.NotFound"
+}
+
+# ─── transit gateway VPC attachments ────────────────────────────────────────
+
+# Creates a gateway, a VPC and one subnet, setting TRANSIT_GATEWAY_ID, TGW_VPC_ID and TGW_SUBNET_ID.
+create_attachment_fixture() {
+    local out
+    out=$(aws_cmd ec2 create-transit-gateway --description "bats attachment host")
+    TRANSIT_GATEWAY_ID=$(json_get "$out" '.TransitGateway.TransitGatewayId')
+    out=$(aws_cmd ec2 create-vpc --cidr-block 10.80.0.0/16)
+    TGW_VPC_ID=$(json_get "$out" '.Vpc.VpcId')
+    out=$(aws_cmd ec2 create-subnet --vpc-id "$TGW_VPC_ID" --cidr-block 10.80.1.0/24 \
+        --availability-zone "${AWS_DEFAULT_REGION}a")
+    TGW_SUBNET_ID=$(json_get "$out" '.Subnet.SubnetId')
+}
+
+@test "EC2: attach a VPC to a transit gateway and read it back both ways" {
+    create_attachment_fixture
+
+    run aws_cmd ec2 create-transit-gateway-vpc-attachment \
+        --transit-gateway-id "$TRANSIT_GATEWAY_ID" \
+        --vpc-id "$TGW_VPC_ID" \
+        --subnet-ids "$TGW_SUBNET_ID" \
+        --tag-specifications 'ResourceType=transit-gateway-attachment,Tags=[{Key=Name,Value=bats-attach}]'
+    assert_success
+    TGW_ATTACHMENT_ID=$(json_get "$output" '.TransitGatewayVpcAttachment.TransitGatewayAttachmentId')
+    [ "$(json_get "$output" '.TransitGatewayVpcAttachment.State')" = "available" ]
+    [ "$(json_get "$output" '.TransitGatewayVpcAttachment.SubnetIds[0]')" = "$TGW_SUBNET_ID" ]
+    # The attachment's own default, which differs from the gateway's.
+    [ "$(json_get "$output" '.TransitGatewayVpcAttachment.Options.SecurityGroupReferencingSupport')" = "enable" ]
+
+    run aws_cmd ec2 describe-transit-gateway-vpc-attachments \
+        --transit-gateway-attachment-ids "$TGW_ATTACHMENT_ID"
+    assert_success
+    [ "$(json_get "$output" '.TransitGatewayVpcAttachments[0].VpcId')" = "$TGW_VPC_ID" ]
+    [ "$(json_get "$output" '.TransitGatewayVpcAttachments[0].Tags[0].Value')" = "bats-attach" ]
+
+    # The resource-agnostic form is a different shape: typed resource plus the association.
+    run aws_cmd ec2 describe-transit-gateway-attachments \
+        --transit-gateway-attachment-ids "$TGW_ATTACHMENT_ID"
+    assert_success
+    [ "$(json_get "$output" '.TransitGatewayAttachments[0].ResourceType')" = "vpc" ]
+    [ "$(json_get "$output" '.TransitGatewayAttachments[0].ResourceId')" = "$TGW_VPC_ID" ]
+    [ "$(json_get "$output" '.TransitGatewayAttachments[0].Association.State')" = "associated" ]
+    rtb=$(json_get "$output" '.TransitGatewayAttachments[0].Association.TransitGatewayRouteTableId')
+    case "$rtb" in tgw-rtb-*) ;; *) return 1 ;; esac
+}
+
+@test "EC2: modify a transit gateway VPC attachment" {
+    create_attachment_fixture
+    local out subnet_b
+    out=$(aws_cmd ec2 create-transit-gateway-vpc-attachment --transit-gateway-id "$TRANSIT_GATEWAY_ID" \
+        --vpc-id "$TGW_VPC_ID" --subnet-ids "$TGW_SUBNET_ID")
+    TGW_ATTACHMENT_ID=$(json_get "$out" '.TransitGatewayVpcAttachment.TransitGatewayAttachmentId')
+    out=$(aws_cmd ec2 create-subnet --vpc-id "$TGW_VPC_ID" --cidr-block 10.80.2.0/24 \
+        --availability-zone "${AWS_DEFAULT_REGION}b")
+    subnet_b=$(json_get "$out" '.Subnet.SubnetId')
+
+    run aws_cmd ec2 modify-transit-gateway-vpc-attachment \
+        --transit-gateway-attachment-id "$TGW_ATTACHMENT_ID" \
+        --add-subnet-ids "$subnet_b" \
+        --options 'DnsSupport=disable'
+    assert_success
+    [ "$(json_get "$output" '.TransitGatewayVpcAttachment.Options.DnsSupport')" = "disable" ]
+    count=$(json_get "$output" '.TransitGatewayVpcAttachment.SubnetIds | length')
+    [ "$count" = "2" ]
+
+    run aws_cmd ec2 modify-transit-gateway-vpc-attachment \
+        --transit-gateway-attachment-id "$TGW_ATTACHMENT_ID" \
+        --remove-subnet-ids "$TGW_SUBNET_ID" "$subnet_b"
+    assert_failure
+    assert_output --partial "InsufficientSubnetsException"
+}
+
+@test "EC2: a transit gateway with an attachment cannot be deleted" {
+    create_attachment_fixture
+    local out
+    out=$(aws_cmd ec2 create-transit-gateway-vpc-attachment --transit-gateway-id "$TRANSIT_GATEWAY_ID" \
+        --vpc-id "$TGW_VPC_ID" --subnet-ids "$TGW_SUBNET_ID")
+    TGW_ATTACHMENT_ID=$(json_get "$out" '.TransitGatewayVpcAttachment.TransitGatewayAttachmentId')
+
+    run aws_cmd ec2 delete-transit-gateway --transit-gateway-id "$TRANSIT_GATEWAY_ID"
+    assert_failure
+    assert_output --partial "IncorrectState"
+
+    run aws_cmd ec2 delete-transit-gateway-vpc-attachment \
+        --transit-gateway-attachment-id "$TGW_ATTACHMENT_ID"
+    assert_success
+    TGW_ATTACHMENT_ID=""
+
+    run aws_cmd ec2 delete-transit-gateway --transit-gateway-id "$TRANSIT_GATEWAY_ID"
+    assert_success
+    TRANSIT_GATEWAY_ID=""
 }

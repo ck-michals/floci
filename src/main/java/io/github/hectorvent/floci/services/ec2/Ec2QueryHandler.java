@@ -89,6 +89,16 @@ public class Ec2QueryHandler {
                 case "DescribeTransitGateways" -> handleDescribeTransitGateways(params, region);
                 case "ModifyTransitGateway" -> handleModifyTransitGateway(params, region);
                 case "DeleteTransitGateway" -> handleDeleteTransitGateway(params, region);
+                case "CreateTransitGatewayVpcAttachment" ->
+                        handleCreateTransitGatewayVpcAttachment(params, region);
+                case "DescribeTransitGatewayVpcAttachments" ->
+                        handleDescribeTransitGatewayVpcAttachments(params, region);
+                case "DescribeTransitGatewayAttachments" ->
+                        handleDescribeTransitGatewayAttachments(params, region);
+                case "ModifyTransitGatewayVpcAttachment" ->
+                        handleModifyTransitGatewayVpcAttachment(params, region);
+                case "DeleteTransitGatewayVpcAttachment" ->
+                        handleDeleteTransitGatewayVpcAttachment(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -404,17 +414,25 @@ public class Ec2QueryHandler {
         return perms;
     }
 
+    /**
+     * Reads a request's tag specifications. Most EC2 actions carry them under the wire name
+     * {@code TagSpecification}, but a handful — {@code CreateTransitGatewayVpcAttachment} among
+     * them — declare no {@code locationName} and so serialize as {@code TagSpecifications}. Both
+     * spellings are read, because an action that used the plural silently lost every tag.
+     */
     private List<Tag> parseTagsForResource(MultivaluedMap<String, String> p, String resourceType) {
         List<Tag> tags = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
-            if (resType == null) break;
-            if (resourceType.equals(resType)) {
-                for (int j = 1; ; j++) {
-                    String key = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
-                    if (key == null) break;
-                    String value = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    tags.add(new Tag(key, value));
+        for (String prefix : new String[] {"TagSpecification", "TagSpecifications"}) {
+            for (int i = 1; ; i++) {
+                String resType = p.getFirst(prefix + "." + i + ".ResourceType");
+                if (resType == null) break;
+                if (resourceType.equals(resType)) {
+                    for (int j = 1; ; j++) {
+                        String key = p.getFirst(prefix + "." + i + ".Tag." + j + ".Key");
+                        if (key == null) break;
+                        String value = p.getFirst(prefix + "." + i + ".Tag." + j + ".Value");
+                        tags.add(new Tag(key, value));
+                    }
                 }
             }
         }
@@ -1256,6 +1274,139 @@ public class Ec2QueryHandler {
         options.setMulticastSupport(p.getFirst(prefix + ".MulticastSupport"));
         options.setTransitGatewayCidrBlocks(getList(p, prefix + ".TransitGatewayCidrBlocks"));
         return options;
+    }
+
+    private Response handleCreateTransitGatewayVpcAttachment(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayVpcAttachment attachment = service.createTransitGatewayVpcAttachment(
+                region,
+                p.getFirst("TransitGatewayId"),
+                p.getFirst("VpcId"),
+                getList(p, "SubnetIds"),
+                parseVpcAttachmentOptions(p),
+                parseTagsForResource(p, "transit-gateway-attachment"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateTransitGatewayVpcAttachmentResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayVpcAttachment").raw(vpcAttachmentXml(attachment, true, true))
+                .end("transitGatewayVpcAttachment")
+                .end("CreateTransitGatewayVpcAttachmentResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeTransitGatewayVpcAttachments(MultivaluedMap<String, String> p, String region) {
+        List<TransitGatewayVpcAttachment> attachments = service.describeTransitGatewayVpcAttachments(
+                region, getList(p, "TransitGatewayAttachmentIds"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTransitGatewayVpcAttachmentsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayVpcAttachments");
+        for (TransitGatewayVpcAttachment attachment : attachments) {
+            xml.start("item").raw(vpcAttachmentXml(attachment, true, true)).end("item");
+        }
+        xml.end("transitGatewayVpcAttachments").end("DescribeTransitGatewayVpcAttachmentsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * The resource-agnostic view of the same attachments. It is a different shape rather than a
+     * superset: the subnets and options are gone, the VPC appears as a typed resource, and the
+     * route table association shows up here and nowhere else.
+     */
+    private Response handleDescribeTransitGatewayAttachments(MultivaluedMap<String, String> p, String region) {
+        List<TransitGatewayVpcAttachment> attachments = service.describeTransitGatewayVpcAttachments(
+                region, getList(p, "TransitGatewayAttachmentIds"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTransitGatewayAttachmentsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayAttachments");
+        for (TransitGatewayVpcAttachment attachment : attachments) {
+            XmlBuilder item = new XmlBuilder()
+                    .elem("transitGatewayAttachmentId", attachment.getTransitGatewayAttachmentId())
+                    .elem("transitGatewayId", attachment.getTransitGatewayId())
+                    .elem("transitGatewayOwnerId", attachment.getTransitGatewayOwnerId())
+                    .elem("resourceOwnerId", attachment.getVpcOwnerId())
+                    .elem("resourceType", "vpc")
+                    .elem("resourceId", attachment.getVpcId())
+                    .elem("state", attachment.getState());
+            if (attachment.getAssociationRouteTableId() != null) {
+                item.start("association")
+                        .elem("transitGatewayRouteTableId", attachment.getAssociationRouteTableId())
+                        .elem("state", attachment.getAssociationState())
+                        .end("association");
+            }
+            item.elem("creationTime", attachment.getCreationTime())
+                    .raw(tagSetXml(attachment.getTags()));
+            xml.start("item").raw(item.build()).end("item");
+        }
+        xml.end("transitGatewayAttachments").end("DescribeTransitGatewayAttachmentsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyTransitGatewayVpcAttachment(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayVpcAttachment attachment = service.modifyTransitGatewayVpcAttachment(
+                region,
+                p.getFirst("TransitGatewayAttachmentId"),
+                getList(p, "AddSubnetIds"),
+                getList(p, "RemoveSubnetIds"),
+                parseVpcAttachmentOptions(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyTransitGatewayVpcAttachmentResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                // Verified live: modify echoes the attachment without its tagSet.
+                .start("transitGatewayVpcAttachment").raw(vpcAttachmentXml(attachment, true, false))
+                .end("transitGatewayVpcAttachment")
+                .end("ModifyTransitGatewayVpcAttachmentResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteTransitGatewayVpcAttachment(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayVpcAttachment attachment = service.deleteTransitGatewayVpcAttachment(
+                region, p.getFirst("TransitGatewayAttachmentId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteTransitGatewayVpcAttachmentResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                // Verified live: delete drops the subnets and the tagSet from the echo.
+                .start("transitGatewayVpcAttachment").raw(vpcAttachmentXml(attachment, false, false))
+                .end("transitGatewayVpcAttachment")
+                .end("DeleteTransitGatewayVpcAttachmentResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private TransitGatewayVpcAttachmentOptions parseVpcAttachmentOptions(MultivaluedMap<String, String> p) {
+        TransitGatewayVpcAttachmentOptions options = new TransitGatewayVpcAttachmentOptions();
+        options.setDnsSupport(p.getFirst("Options.DnsSupport"));
+        options.setSecurityGroupReferencingSupport(p.getFirst("Options.SecurityGroupReferencingSupport"));
+        options.setIpv6Support(p.getFirst("Options.Ipv6Support"));
+        options.setApplianceModeSupport(p.getFirst("Options.ApplianceModeSupport"));
+        return options;
+    }
+
+    private String vpcAttachmentXml(TransitGatewayVpcAttachment attachment, boolean includeSubnets,
+                                    boolean includeTags) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("transitGatewayAttachmentId", attachment.getTransitGatewayAttachmentId())
+                .elem("transitGatewayId", attachment.getTransitGatewayId())
+                .elem("vpcId", attachment.getVpcId())
+                .elem("vpcOwnerId", attachment.getVpcOwnerId())
+                .elem("state", attachment.getState());
+        if (includeSubnets) {
+            xml.start("subnetIds");
+            for (String subnetId : attachment.getSubnetIds()) {
+                xml.elem("item", subnetId);
+            }
+            xml.end("subnetIds");
+        }
+        xml.elem("creationTime", attachment.getCreationTime())
+                .start("options")
+                .elem("dnsSupport", attachment.getOptions().getDnsSupport())
+                .elem("securityGroupReferencingSupport", attachment.getOptions().getSecurityGroupReferencingSupport())
+                .elem("ipv6Support", attachment.getOptions().getIpv6Support())
+                .elem("applianceModeSupport", attachment.getOptions().getApplianceModeSupport())
+                .end("options");
+        if (includeTags) {
+            xml.raw(tagSetXml(attachment.getTags()));
+        }
+        return xml.build();
     }
 
     private String transitGatewayXml(TransitGateway gateway) {
