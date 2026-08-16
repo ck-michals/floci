@@ -2495,6 +2495,52 @@ class Ec2ServiceTest {
         assertTrue(service.searchTransitGatewayRoutes("us-east-1", foreignTable, Map.of()).isEmpty());
     }
 
+    /**
+     * Verified on a live account: replacing a route flips its target in place, and replacing a
+     * destination the table has never held writes it rather than reporting it missing — an upsert
+     * rather than an update.
+     */
+    @Test
+    void replacingARouteMovesItsTargetAndUpsertsWhenAbsent() {
+        Ec2Service service = prefixListService();
+        String[] fixture = routeTableFixture(service);
+        service.createTransitGatewayRoute("us-east-1", fixture[4], "10.88.0.0/16", fixture[3], false);
+
+        TransitGatewayRoute blackholed = service.replaceTransitGatewayRoute("us-east-1", fixture[4],
+                "10.88.0.0/16", null, true);
+        assertEquals("blackhole", blackholed.getState());
+        assertNull(blackholed.getTransitGatewayAttachmentId(), "the target moves as one");
+        assertNull(blackholed.getResourceId());
+
+        TransitGatewayRoute restored = service.replaceTransitGatewayRoute("us-east-1", fixture[4],
+                "10.88.0.0/16", fixture[3], false);
+        assertEquals("active", restored.getState());
+        assertEquals(fixture[3], restored.getTransitGatewayAttachmentId());
+        assertEquals(fixture[1], restored.getResourceId());
+
+        TransitGatewayRoute created = service.replaceTransitGatewayRoute("us-east-1", fixture[4],
+                "10.89.0.0/16", null, true);
+        assertEquals("blackhole", created.getState());
+        assertEquals(2, service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                Map.of("type", List.of("static"))).size(), "replacing an absent route writes it");
+
+        // The same ownership rule as the other route table operations.
+        String otherGateway = service.createTransitGateway("us-east-1", "other", null, List.of())
+                .getTransitGatewayId();
+        String foreignTable = service.createTransitGatewayRouteTable("us-east-1", otherGateway, List.of())
+                .getTransitGatewayRouteTableId();
+        assertEquals("InvalidTransitGatewayAttachmentID.NotFound", assertThrows(AwsException.class,
+                () -> service.replaceTransitGatewayRoute("us-east-1", foreignTable, "10.90.0.0/16",
+                        fixture[3], false)).getErrorCode());
+
+        // A replaced route is still a route, so losing its attachment blackholes it.
+        service.deleteTransitGatewayVpcAttachment("us-east-1", fixture[3]);
+        TransitGatewayRoute afterDetach = service.searchTransitGatewayRoutes("us-east-1", fixture[4],
+                Map.of("route-search.exact-match", List.of("10.88.0.0/16"))).getFirst();
+        assertEquals("blackhole", afterDetach.getState());
+        assertNull(afterDetach.getTransitGatewayAttachmentId());
+    }
+
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);

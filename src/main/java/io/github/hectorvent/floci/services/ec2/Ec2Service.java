@@ -1744,6 +1744,47 @@ public class Ec2Service implements ContainerTeardown {
         }
     }
 
+    /**
+     * Replaces a route's target, and writes the route when it is not there. Verified on a live
+     * account: replacing a destination the table has never held creates it rather than reporting
+     * it missing, so this is an upsert and not an update.
+     */
+    public TransitGatewayRoute replaceTransitGatewayRoute(String region, String routeTableId,
+                                                          String destinationCidrBlock, String attachmentId,
+                                                          boolean blackhole) {
+        synchronized (attachmentTopologyLock(region)) {
+            TransitGatewayRouteTable routeTable = getRequiredTransitGatewayRouteTable(region, routeTableId);
+            if (destinationCidrBlock == null || destinationCidrBlock.isBlank()) {
+                throw new AwsException("MissingParameter",
+                        "The request must contain the parameter DestinationCidrBlock.", 400);
+            }
+            TransitGatewayRoute route = transitGatewayRoutes
+                    .get(routeKey(region, routeTableId, destinationCidrBlock))
+                    .orElseGet(TransitGatewayRoute::new);
+            route.setTransitGatewayRouteTableId(routeTableId);
+            route.setDestinationCidrBlock(destinationCidrBlock);
+            route.setType("static");
+            route.setRegion(region);
+            // The target moves as one: a blackhole keeps no attachment, and pointing the route at
+            // an attachment again restores all three fields together.
+            if (blackhole) {
+                route.setState("blackhole");
+                route.setTransitGatewayAttachmentId(null);
+                route.setResourceId(null);
+                route.setResourceType(null);
+            } else {
+                TransitGatewayVpcAttachment attachment =
+                        requireAttachmentOfSameGateway(region, routeTable, attachmentId);
+                route.setState("active");
+                route.setTransitGatewayAttachmentId(attachmentId);
+                route.setResourceId(attachment.getVpcId());
+                route.setResourceType("vpc");
+            }
+            transitGatewayRoutes.put(routeKey(region, routeTableId, destinationCidrBlock), route);
+            return route;
+        }
+    }
+
     public TransitGatewayRoute deleteTransitGatewayRoute(String region, String routeTableId,
                                                          String destinationCidrBlock) {
         synchronized (attachmentTopologyLock(region)) {

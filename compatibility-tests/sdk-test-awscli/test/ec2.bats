@@ -567,3 +567,42 @@ create_attachment_fixture() {
     assert_success
     [ "$(json_get "$output" '.Route.State')" = "deleted" ]
 }
+
+@test "EC2: replacing a transit gateway route moves its target and upserts" {
+    create_attachment_fixture
+    local out
+    out=$(aws_cmd ec2 create-transit-gateway-vpc-attachment --transit-gateway-id "$TRANSIT_GATEWAY_ID" \
+        --vpc-id "$TGW_VPC_ID" --subnet-ids "$TGW_SUBNET_ID")
+    TGW_ATTACHMENT_ID=$(json_get "$out" '.TransitGatewayVpcAttachment.TransitGatewayAttachmentId')
+    out=$(aws_cmd ec2 create-transit-gateway-route-table --transit-gateway-id "$TRANSIT_GATEWAY_ID")
+    TGW_ROUTE_TABLE_ID=$(json_get "$out" '.TransitGatewayRouteTable.TransitGatewayRouteTableId')
+    aws_cmd ec2 create-transit-gateway-route --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --destination-cidr-block 10.88.0.0/16 --transit-gateway-attachment-id "$TGW_ATTACHMENT_ID" >/dev/null
+
+    run aws_cmd ec2 replace-transit-gateway-route \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --destination-cidr-block 10.88.0.0/16 --blackhole
+    assert_success
+    [ "$(json_get "$output" '.Route.State')" = "blackhole" ]
+    count=$(json_get "$output" '.Route.TransitGatewayAttachments // [] | length')
+    [ "$count" = "0" ]
+
+    run aws_cmd ec2 replace-transit-gateway-route \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --destination-cidr-block 10.88.0.0/16 \
+        --transit-gateway-attachment-id "$TGW_ATTACHMENT_ID"
+    assert_success
+    [ "$(json_get "$output" '.Route.State')" = "active" ]
+
+    # Replacing a destination the table never held writes it.
+    run aws_cmd ec2 replace-transit-gateway-route \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --destination-cidr-block 10.89.0.0/16 --blackhole
+    assert_success
+    run aws_cmd ec2 search-transit-gateway-routes \
+        --transit-gateway-route-table-id "$TGW_ROUTE_TABLE_ID" \
+        --filters 'Name=type,Values=static'
+    assert_success
+    count=$(json_get "$output" '.Routes | length')
+    [ "$count" = "2" ]
+}

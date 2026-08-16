@@ -118,6 +118,7 @@ public class Ec2QueryHandler {
                         handleGetTransitGatewayRouteTablePropagations(params, region);
                 case "CreateTransitGatewayRoute" -> handleCreateTransitGatewayRoute(params, region);
                 case "DeleteTransitGatewayRoute" -> handleDeleteTransitGatewayRoute(params, region);
+                case "ReplaceTransitGatewayRoute" -> handleReplaceTransitGatewayRoute(params, region);
                 case "SearchTransitGatewayRoutes" -> handleSearchTransitGatewayRoutes(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
@@ -1533,6 +1534,20 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("route").raw(routeXml(route)).end("route")
                 .end("CreateTransitGatewayRouteResponse").build());
+    }
+
+    private Response handleReplaceTransitGatewayRoute(MultivaluedMap<String, String> p, String region) {
+        TransitGatewayRoute route = service.replaceTransitGatewayRoute(
+                region,
+                p.getFirst("TransitGatewayRouteTableId"),
+                p.getFirst("DestinationCidrBlock"),
+                p.getFirst("TransitGatewayAttachmentId"),
+                Boolean.parseBoolean(p.getFirst("Blackhole")));
+        return xmlResponse(new XmlBuilder()
+                .start("ReplaceTransitGatewayRouteResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("route").raw(routeXml(route)).end("route")
+                .end("ReplaceTransitGatewayRouteResponse").build());
     }
 
     private Response handleDeleteTransitGatewayRoute(MultivaluedMap<String, String> p, String region) {

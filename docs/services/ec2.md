@@ -387,6 +387,7 @@ real AWS rejects; Floci does not model subnet IPv6 allocation.
 | GetTransitGatewayRouteTablePropagations | Lists the propagations into a route table. |
 | CreateTransitGatewayRoute | Adds a static or blackhole route to a route table. |
 | DeleteTransitGatewayRoute | Removes a static route. |
+| ReplaceTransitGatewayRoute | Points an existing route at a different target, or writes it if absent. |
 | SearchTransitGatewayRoutes | Returns a route table's routes, static and propagated, filtered. |
 
 A route table asked for by name is never a default one; only the table a gateway mints for itself
@@ -404,6 +405,11 @@ Propagation is separate: one attachment may propagate into several route tables.
 returns `TransitGatewayRouteTablePropagation.Duplicate`. Unlike association, which reports
 `associating` and `disassociating`, propagation reports the settled `enabled` or `disabled` at
 once — that is what the live API does rather than a shortcut taken here.
+
+`ReplaceTransitGatewayRoute` is an upsert rather than an update: replacing a destination the table
+has never held writes it instead of reporting it missing, which is what the live API does. The
+target moves as a unit, so a route turned into a blackhole keeps no attachment and one pointed back
+at an attachment regains all of its fields.
 
 `SearchTransitGatewayRoutes` serves both kinds of route. Static routes are stored as written; a
 blackhole is a static route in the `blackhole` state rather than a type of its own, and carries no
