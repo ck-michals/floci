@@ -1839,6 +1839,64 @@ class Ec2ServiceTest {
     }
 
     /**
+     * Tagging is a read-modify-write, so a tag call racing a delete must not put the record back.
+     * A resurrected attachment would keep blocking the VPC and subnets it names, and a resurrected
+     * gateway would keep blocking its own deletion, with nothing left to delete either of them.
+     */
+    @Test
+    void taggingCannotResurrectSomethingBeingDeleted() throws Exception {
+        for (boolean attachment : List.of(true, false)) {
+            for (int trial = 0; trial < 10; trial++) {
+                Ec2Service service = prefixListService();
+                String[] fixture = attachmentFixture(service);
+                String attachmentId = service.createTransitGatewayVpcAttachment("us-east-1", fixture[0],
+                        fixture[1], List.of(fixture[2]), null, List.of()).getTransitGatewayAttachmentId();
+                String target = attachment ? attachmentId : fixture[0];
+                if (!attachment) {
+                    service.deleteTransitGatewayVpcAttachment("us-east-1", attachmentId);
+                }
+                java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+                java.util.concurrent.ExecutorService pool =
+                        java.util.concurrent.Executors.newFixedThreadPool(2);
+
+                pool.submit(() -> {
+                    try {
+                        start.await();
+                        service.createTags("us-east-1", List.of(target), List.of(new Tag("env", "prod")));
+                    } catch (AwsException | InterruptedException ignored) {
+                        // Losing the race is fine; the invariant is below.
+                    }
+                });
+                pool.submit(() -> {
+                    try {
+                        start.await();
+                        if (attachment) {
+                            service.deleteTransitGatewayVpcAttachment("us-east-1", target);
+                        } else {
+                            service.deleteTransitGateway("us-east-1", target);
+                        }
+                    } catch (AwsException | InterruptedException ignored) {
+                        // Same.
+                    }
+                });
+                start.countDown();
+                pool.shutdown();
+                assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+
+                String what = attachment ? "attachment" : "gateway";
+                if (attachment) {
+                    assertTrue(service.describeTransitGatewayVpcAttachments("us-east-1", List.of(), Map.of())
+                            .isEmpty(), what + " trial " + trial + ": tagging put the deleted record back");
+                } else {
+                    assertTrue(service.describeTransitGateways("us-east-1", List.of(), Map.of()).stream()
+                                    .noneMatch(g -> g.getTransitGatewayId().equals(target)),
+                            what + " trial " + trial + ": tagging put the deleted record back");
+                }
+            }
+        }
+    }
+
+    /**
      * Verified on a live account: an attached VPC or subnet cannot be deleted out from under the
      * attachment, and both report the same {@code DependencyViolation}. Without this the stored
      * attachment would go on naming resources that no longer exist, and a later modify would fail

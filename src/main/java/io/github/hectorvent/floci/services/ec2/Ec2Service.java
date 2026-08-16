@@ -3374,22 +3374,41 @@ public class Ec2Service implements ContainerTeardown {
     public void createTags(String region, List<String> resourceIds, List<Tag> tagList) {
         ensureDefaultResources(region);
         for (String resourceId : resourceIds) {
-            synchronized (lockFor(key(region, resourceId))) {
-                List<Tag> existing = new ArrayList<>(tags.get(resourceId).orElse(List.of()));
-                for (Tag tag : tagList) {
-                    existing.removeIf(t -> t.getKey().equals(tag.getKey()));
-                    existing.add(tag);
+            withTopologyLockIfNeeded(region, resourceId, () -> {
+                synchronized (lockFor(key(region, resourceId))) {
+                    List<Tag> existing = new ArrayList<>(tags.get(resourceId).orElse(List.of()));
+                    for (Tag tag : tagList) {
+                        existing.removeIf(t -> t.getKey().equals(tag.getKey()));
+                        existing.add(tag);
+                    }
+                    tags.put(resourceId, existing);
+                    // Update resource objects
+                    updateResourceTags(region, resourceId, existing);
                 }
-                tags.put(resourceId, existing);
-                // Update resource objects
-                updateResourceTags(region, resourceId, existing);
-            }
+            });
         }
+    }
+
+    /**
+     * Runs a tag change with the topology lock already held when the resource is one a transit
+     * gateway delete can remove. Order matters as much as the lock does: the deletes take the
+     * topology lock and then a striped resource lock, so tagging has to take them the same way
+     * round or the two deadlock.
+     */
+    private void withTopologyLockIfNeeded(String region, String resourceId, Runnable change) {
+        if (resourceId != null && resourceId.startsWith("tgw-")) {
+            synchronized (attachmentTopologyLock(region)) {
+                change.run();
+            }
+            return;
+        }
+        change.run();
     }
 
     public void deleteTags(String region, List<String> resourceIds, List<Tag> tagList) {
         ensureDefaultResources(region);
         for (String resourceId : resourceIds) {
+            withTopologyLockIfNeeded(region, resourceId, () -> {
             synchronized (lockFor(key(region, resourceId))) {
                 List<Tag> stored = tags.get(resourceId).orElse(null);
                 if (stored != null) {
@@ -3402,6 +3421,7 @@ public class Ec2Service implements ContainerTeardown {
                     updateResourceTags(region, resourceId, existing);
                 }
             }
+            });
         }
     }
 
@@ -3439,22 +3459,26 @@ public class Ec2Service implements ContainerTeardown {
             managedPrefixLists.put(storeKey, prefixList);
             return;
         }
-        TransitGateway gateway = transitGateways.get(storeKey).orElse(null);
-        if (gateway != null) {
-            gateway.setTags(new ArrayList<>(tagList));
-            transitGateways.put(storeKey, gateway);
-            return;
-        }
-        TransitGatewayRouteTable routeTable = transitGatewayRouteTables.get(storeKey).orElse(null);
-        if (routeTable != null) {
-            routeTable.setTags(new ArrayList<>(tagList));
-            transitGatewayRouteTables.put(storeKey, routeTable);
-            return;
-        }
-        TransitGatewayVpcAttachment attachment = transitGatewayVpcAttachments.get(storeKey).orElse(null);
-        if (attachment != null) {
-            attachment.setTags(new ArrayList<>(tagList));
-            transitGatewayVpcAttachments.put(storeKey, attachment);
+        // Reached with the topology lock already held for tgw- resources, so the read-modify-write
+        // below cannot put back something a concurrent delete has just removed.
+        {
+            TransitGateway gateway = transitGateways.get(storeKey).orElse(null);
+            if (gateway != null) {
+                gateway.setTags(new ArrayList<>(tagList));
+                transitGateways.put(storeKey, gateway);
+                return;
+            }
+            TransitGatewayRouteTable routeTable = transitGatewayRouteTables.get(storeKey).orElse(null);
+            if (routeTable != null) {
+                routeTable.setTags(new ArrayList<>(tagList));
+                transitGatewayRouteTables.put(storeKey, routeTable);
+                return;
+            }
+            TransitGatewayVpcAttachment attachment = transitGatewayVpcAttachments.get(storeKey).orElse(null);
+            if (attachment != null) {
+                attachment.setTags(new ArrayList<>(tagList));
+                transitGatewayVpcAttachments.put(storeKey, attachment);
+            }
         }
     }
 
