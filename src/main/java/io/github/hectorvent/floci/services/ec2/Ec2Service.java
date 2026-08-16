@@ -926,6 +926,9 @@ public class Ec2Service implements ContainerTeardown {
      */
     public TransitGateway createTransitGateway(String region, String description,
                                                TransitGatewayOptions requested, List<Tag> gatewayTags) {
+        // Held here too, so the rule needs no exceptions: every write to a gateway, route table,
+        // attachment, propagation or route happens under this one lock.
+        synchronized (attachmentTopologyLock(region)) {
         String transitGatewayId = "tgw-" + randomHex(17);
         TransitGateway gateway = new TransitGateway();
         gateway.setTransitGatewayId(transitGatewayId);
@@ -956,6 +959,7 @@ public class Ec2Service implements ContainerTeardown {
         }
         transitGateways.put(key(region, transitGatewayId), gateway);
         return gateway;
+        }
     }
 
     private TransitGatewayOptions resolveTransitGatewayOptions(TransitGatewayOptions requested) {
@@ -1038,6 +1042,10 @@ public class Ec2Service implements ContainerTeardown {
     public TransitGateway modifyTransitGateway(String region, String transitGatewayId, String description,
                                                TransitGatewayOptions changes, List<String> addCidrBlocks,
                                                List<String> removeCidrBlocks) {
+        // Outermost first, as the deletes take it: this writes route tables through
+        // markDefaultRouteTable, and a delete running between the read and that write would be
+        // undone by it.
+        synchronized (attachmentTopologyLock(region)) {
         synchronized (lockFor(key(region, transitGatewayId))) {
             TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
             requireCoherentDefaultRouteTableChange(region, gateway, changes);
@@ -1058,6 +1066,7 @@ public class Ec2Service implements ContainerTeardown {
             }
             transitGateways.put(key(region, transitGatewayId), gateway);
             return gateway;
+        }
         }
     }
 
@@ -1523,6 +1532,21 @@ public class Ec2Service implements ContainerTeardown {
 
     // ─── Transit Gateway Route Tables, Associations, Propagations and Routes ───
 
+    /**
+     * An attachment reached through a route table has to hang off the same gateway. Verified on a
+     * live account: associating, propagating or routing to an attachment of another gateway is
+     * refused as though the attachment did not exist, rather than with a mismatch of its own.
+     */
+    private TransitGatewayVpcAttachment requireAttachmentOfSameGateway(
+            String region, TransitGatewayRouteTable routeTable, String attachmentId) {
+        TransitGatewayVpcAttachment attachment = getRequiredVpcAttachment(region, attachmentId);
+        if (!routeTable.getTransitGatewayId().equals(attachment.getTransitGatewayId())) {
+            throw new AwsException("InvalidTransitGatewayAttachmentID.NotFound",
+                    "Transit Gateway Attachment " + attachmentId + " was deleted or does not exist.", 400);
+        }
+        return attachment;
+    }
+
     public TransitGatewayRouteTable createTransitGatewayRouteTable(
             String region, String transitGatewayId, List<Tag> routeTableTags) {
         synchronized (attachmentTopologyLock(region)) {
@@ -1601,8 +1625,9 @@ public class Ec2Service implements ContainerTeardown {
     public TransitGatewayVpcAttachment associateTransitGatewayRouteTable(
             String region, String routeTableId, String attachmentId) {
         synchronized (attachmentTopologyLock(region)) {
-            getRequiredTransitGatewayRouteTable(region, routeTableId);
-            TransitGatewayVpcAttachment attachment = getRequiredVpcAttachment(region, attachmentId);
+            TransitGatewayRouteTable routeTable = getRequiredTransitGatewayRouteTable(region, routeTableId);
+            TransitGatewayVpcAttachment attachment =
+                    requireAttachmentOfSameGateway(region, routeTable, attachmentId);
             if (attachment.getAssociationRouteTableId() != null) {
                 throw new AwsException("Resource.AlreadyAssociated", "Transit Gateway Attachment "
                         + attachmentId + " is already associated to a route table.", 400);
@@ -1617,8 +1642,9 @@ public class Ec2Service implements ContainerTeardown {
     public TransitGatewayVpcAttachment disassociateTransitGatewayRouteTable(
             String region, String routeTableId, String attachmentId) {
         synchronized (attachmentTopologyLock(region)) {
-            getRequiredTransitGatewayRouteTable(region, routeTableId);
-            TransitGatewayVpcAttachment attachment = getRequiredVpcAttachment(region, attachmentId);
+            TransitGatewayRouteTable routeTable = getRequiredTransitGatewayRouteTable(region, routeTableId);
+            TransitGatewayVpcAttachment attachment =
+                    requireAttachmentOfSameGateway(region, routeTable, attachmentId);
             if (!routeTableId.equals(attachment.getAssociationRouteTableId())) {
                 throw new AwsException("InvalidparameterValue", "Transit Gateway Attachment "
                         + attachmentId + " is not associated with route table " + routeTableId + ".", 400);
@@ -1641,8 +1667,9 @@ public class Ec2Service implements ContainerTeardown {
     public TransitGatewayRouteTablePropagation enableTransitGatewayRouteTablePropagation(
             String region, String routeTableId, String attachmentId) {
         synchronized (attachmentTopologyLock(region)) {
-            getRequiredTransitGatewayRouteTable(region, routeTableId);
-            TransitGatewayVpcAttachment attachment = getRequiredVpcAttachment(region, attachmentId);
+            TransitGatewayRouteTable routeTable = getRequiredTransitGatewayRouteTable(region, routeTableId);
+            TransitGatewayVpcAttachment attachment =
+                    requireAttachmentOfSameGateway(region, routeTable, attachmentId);
             if (transitGatewayPropagations.get(propagationKey(region, routeTableId, attachmentId)).isPresent()) {
                 throw new AwsException("TransitGatewayRouteTablePropagation.Duplicate", "Propagation "
                         + attachmentId + " already exists in Transit Gateway Route Table " + routeTableId + ".", 400);
@@ -1664,8 +1691,8 @@ public class Ec2Service implements ContainerTeardown {
     public TransitGatewayRouteTablePropagation disableTransitGatewayRouteTablePropagation(
             String region, String routeTableId, String attachmentId) {
         synchronized (attachmentTopologyLock(region)) {
-            getRequiredTransitGatewayRouteTable(region, routeTableId);
-            getRequiredVpcAttachment(region, attachmentId);
+            TransitGatewayRouteTable routeTable = getRequiredTransitGatewayRouteTable(region, routeTableId);
+            requireAttachmentOfSameGateway(region, routeTable, attachmentId);
             TransitGatewayRouteTablePropagation propagation = transitGatewayPropagations
                     .get(propagationKey(region, routeTableId, attachmentId))
                     .orElseThrow(() -> new AwsException("InvalidparameterValue", "Propagation "
@@ -1706,7 +1733,8 @@ public class Ec2Service implements ContainerTeardown {
             route.setState(blackhole ? "blackhole" : "active");
             route.setRegion(region);
             if (!blackhole) {
-                TransitGatewayVpcAttachment attachment = getRequiredVpcAttachment(region, attachmentId);
+                TransitGatewayVpcAttachment attachment = requireAttachmentOfSameGateway(region,
+                        getRequiredTransitGatewayRouteTable(region, routeTableId), attachmentId);
                 route.setTransitGatewayAttachmentId(attachmentId);
                 route.setResourceId(attachment.getVpcId());
                 route.setResourceType("vpc");

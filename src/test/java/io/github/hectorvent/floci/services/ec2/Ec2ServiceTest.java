@@ -2415,6 +2415,86 @@ class Ec2ServiceTest {
                 "and their tags");
     }
 
+    /**
+     * Modifying a gateway writes route tables through its default-table markers, so it races the
+     * deletes the same way tagging does. Whoever wins, a deleted table must not come back.
+     */
+    @Test
+    void modifyingAGatewayCannotResurrectADeletedRouteTable() throws Exception {
+        for (int trial = 0; trial < 10; trial++) {
+            Ec2Service service = prefixListService();
+            String[] fixture = attachmentFixture(service);
+            String spare = service.createTransitGatewayRouteTable("us-east-1", fixture[0], List.of())
+                    .getTransitGatewayRouteTableId();
+            java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.ExecutorService pool =
+                    java.util.concurrent.Executors.newFixedThreadPool(2);
+
+            pool.submit(() -> {
+                try {
+                    start.await();
+                    TransitGatewayOptions changes = new TransitGatewayOptions();
+                    changes.setDefaultRouteTableAssociation("enable");
+                    changes.setAssociationDefaultRouteTableId(spare);
+                    service.modifyTransitGateway("us-east-1", fixture[0], null, changes, List.of(), List.of());
+                } catch (AwsException | InterruptedException ignored) {
+                    // Losing the race is fine.
+                }
+            });
+            pool.submit(() -> {
+                try {
+                    start.await();
+                    service.deleteTransitGatewayRouteTable("us-east-1", spare);
+                } catch (AwsException | InterruptedException ignored) {
+                    // Same.
+                }
+            });
+            start.countDown();
+            pool.shutdown();
+            assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+
+            boolean tableExists = service.describeTransitGatewayRouteTables("us-east-1", List.of(), Map.of())
+                    .stream().anyMatch(rt -> rt.getTransitGatewayRouteTableId().equals(spare));
+            TransitGateway gateway = service.describeTransitGateways("us-east-1", List.of(fixture[0]), Map.of())
+                    .getFirst();
+            if (!tableExists) {
+                assertNotEquals(spare, gateway.getOptions().getAssociationDefaultRouteTableId(),
+                        "trial " + trial + ": the gateway names a route table that is gone");
+            }
+        }
+    }
+
+    /**
+     * Verified on a live account: a route table only reaches attachments of its own gateway.
+     * Associating, propagating or routing to another gateway's attachment is refused as though the
+     * attachment did not exist, which is the same shape as a subnet belonging to another VPC.
+     */
+    @Test
+    void aRouteTableOnlyReachesItsOwnGatewaysAttachments() {
+        Ec2Service service = prefixListService();
+        String[] fixture = routeTableFixture(service);
+        String otherGateway = service.createTransitGateway("us-east-1", "other", null, List.of())
+                .getTransitGatewayId();
+        String foreignTable = service.createTransitGatewayRouteTable("us-east-1", otherGateway, List.of())
+                .getTransitGatewayRouteTableId();
+
+        for (Runnable crossGateway : List.<Runnable>of(
+                () -> service.associateTransitGatewayRouteTable("us-east-1", foreignTable, fixture[3]),
+                () -> service.disassociateTransitGatewayRouteTable("us-east-1", foreignTable, fixture[3]),
+                () -> service.enableTransitGatewayRouteTablePropagation("us-east-1", foreignTable, fixture[3]),
+                () -> service.disableTransitGatewayRouteTablePropagation("us-east-1", foreignTable, fixture[3]),
+                () -> service.createTransitGatewayRoute("us-east-1", foreignTable, "10.77.0.0/16",
+                        fixture[3], false))) {
+            assertEquals("InvalidTransitGatewayAttachmentID.NotFound",
+                    assertThrows(AwsException.class, crossGateway::run).getErrorCode());
+        }
+
+        // Nothing was recorded against the other gateway's table on the way through.
+        assertTrue(service.associationsOf("us-east-1", foreignTable).isEmpty());
+        assertTrue(service.propagationsOf("us-east-1", foreignTable).isEmpty());
+        assertTrue(service.searchTransitGatewayRoutes("us-east-1", foreignTable, Map.of()).isEmpty());
+    }
+
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
