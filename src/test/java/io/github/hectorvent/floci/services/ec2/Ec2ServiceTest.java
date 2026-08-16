@@ -1740,10 +1740,12 @@ class Ec2ServiceTest {
      */
     @Test
     void concurrentAttachmentsForOneVpcLeaveExactlyOne() throws Exception {
-        for (int trial = 0; trial < 40; trial++) {
+        // Kept deliberately small: without the lock the race shows on the first trial, and this
+        // suite has thread-timing-sensitive tests elsewhere that a heavier harness disturbs.
+        for (int trial = 0; trial < 10; trial++) {
             Ec2Service service = prefixListService();
             String[] fixture = attachmentFixture(service);
-            int threads = 8;
+            int threads = 6;
             java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
             java.util.concurrent.ExecutorService pool =
                     java.util.concurrent.Executors.newFixedThreadPool(threads);
