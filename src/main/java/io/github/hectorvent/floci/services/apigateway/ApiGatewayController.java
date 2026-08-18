@@ -1206,8 +1206,8 @@ public class ApiGatewayController {
 
         String basePath = ApiGatewayService.canonicalBasePath(
                 request.get("apiMappingKey") == null ? null : String.valueOf(request.get("apiMappingKey")));
-        boolean keyTaken = service.getBasePathMappings(region, domainName).stream()
-                .anyMatch(existing -> ApiGatewayService.canonicalBasePath(existing.getBasePath()).equals(basePath));
+        boolean keyTaken = service.basePathMappingsByStoredPath(region, domainName).keySet().stream()
+                .anyMatch(existing -> ApiGatewayService.canonicalBasePath(existing).equals(basePath));
         if (keyTaken) {
             throw new AwsException("ConflictException",
                     "ApiMapping key already exists for this domain name", 409);
@@ -1218,7 +1218,7 @@ public class ApiGatewayController {
         v1Request.put("stage", stage);
         v1Request.put("basePath", basePath);
         BasePathMapping mapping = service.createBasePathMapping(region, domainName, v1Request);
-        return Response.status(201).entity(toApiMappingNode(mapping).toString())
+        return Response.status(201).entity(toApiMappingNode(basePath, mapping).toString())
                 .type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -1228,7 +1228,8 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("items");
-        service.getBasePathMappings(region, domainName).forEach(m -> items.add(toApiMappingNode(m)));
+        service.basePathMappingsByStoredPath(region, domainName)
+                .forEach((storedPath, mapping) -> items.add(toApiMappingNode(storedPath, mapping)));
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -1238,7 +1239,8 @@ public class ApiGatewayController {
                                   @PathParam("domainName") String domainName,
                                   @PathParam("apiMappingId") String apiMappingId) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(toApiMappingNode(findApiMapping(region, domainName, apiMappingId)).toString())
+        StoredMapping found = findApiMapping(region, domainName, apiMappingId);
+        return Response.ok(toApiMappingNode(found.storedPath(), found.mapping()).toString())
                 .type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -1250,8 +1252,8 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         // Deleted by the path the selected record is stored under, so the record that answered the
         // lookup is the record that goes.
-        BasePathMapping mapping = findApiMapping(region, domainName, apiMappingId);
-        service.deleteBasePathMappingRecord(region, domainName, mapping.getBasePath());
+        StoredMapping found = findApiMapping(region, domainName, apiMappingId);
+        service.deleteBasePathMappingRecord(region, domainName, found.storedPath());
         return Response.noContent().build();
     }
 
@@ -1935,13 +1937,15 @@ public class ApiGatewayController {
         return node;
     }
 
-    private ObjectNode toApiMappingNode(BasePathMapping mapping) {
+    private ObjectNode toApiMappingNode(String storedPath, BasePathMapping mapping) {
         ObjectNode node = objectMapper.createObjectNode();
-        node.put("apiMappingId", apiMappingId(mapping));
+        node.put("apiMappingId", apiMappingId(storedPath));
         node.put("apiId", mapping.getRestApiId());
         node.put("stage", mapping.getStage());
         // v1 stores the root mapping as "(none)"; v2 expresses it as an empty key.
-        node.put("apiMappingKey", "(none)".equals(mapping.getBasePath()) ? "" : mapping.getBasePath());
+        // The key reported is the one the record is stored under, so it matches its id.
+        String canonical = ApiGatewayService.canonicalBasePath(storedPath);
+        node.put("apiMappingKey", "(none)".equals(canonical) ? "" : canonical);
         return node;
     }
 
@@ -1966,18 +1970,23 @@ public class ApiGatewayController {
      */
     // Package-private so the identity property can be tested against records that only persisted
     // state can hold: no API path creates a non-canonical base path any more.
-    static String apiMappingId(BasePathMapping mapping) {
-        // Encoded from the path the record is stored under, not from its canonical form: state
-        // written before writes were canonicalised can hold "/" or "" beside "(none)", and folding
-        // those together would hand several records one id for a read or a delete to choose between.
-        // The prefix keeps an empty stored path from producing an empty id.
-        String storedPath = mapping.getBasePath() == null ? "" : mapping.getBasePath();
-        return "m" + HexFormat.of().formatHex(storedPath.getBytes(StandardCharsets.UTF_8));
+    static String apiMappingId(String storedPath) {
+        // Encoded from the key the record is stored under — not its canonical form, and not the
+        // record's own field, which BasePathMapping normalises on construction. State written
+        // before writes were canonicalised can sit under "" or "/" beside "(none)", and reading
+        // identity from anywhere but the key hands several records one id for a read or a delete
+        // to choose between. The prefix keeps an empty stored path from producing an empty id.
+        return "m" + HexFormat.of().formatHex(
+                (storedPath == null ? "" : storedPath).getBytes(StandardCharsets.UTF_8));
     }
 
-    private BasePathMapping findApiMapping(String region, String domainName, String apiMappingId) {
-        return service.getBasePathMappings(region, domainName).stream()
-                .filter(m -> apiMappingId(m).equals(apiMappingId))
+    /** A mapping together with the base path it is stored under, which is what identifies it. */
+    private record StoredMapping(String storedPath, BasePathMapping mapping) {}
+
+    private StoredMapping findApiMapping(String region, String domainName, String apiMappingId) {
+        return service.basePathMappingsByStoredPath(region, domainName).entrySet().stream()
+                .filter(entry -> apiMappingId(entry.getKey()).equals(apiMappingId))
+                .map(entry -> new StoredMapping(entry.getKey(), entry.getValue()))
                 .findFirst()
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Unable to find ApiMapping with ID " + apiMappingId, 404));
