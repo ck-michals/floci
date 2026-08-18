@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigateway;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -955,6 +956,7 @@ public class ApiGatewayController {
     @Path("/v2/apis/{apiId}")
     public Response deleteApi(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
         String region = regionResolver.resolveRegion(headers);
+        service.requireNoApiMappings(region, apiId);
         v2Service.deleteApi(region, apiId);
         return Response.noContent().build();
     }
@@ -1129,6 +1131,109 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         v2Service.deleteVpcLink(region, vpcLinkId);
         return Response.accepted().build();
+    }
+
+    // ──────────────────────────── Custom Domains (v2) ────────────────────────────
+    //
+    // A custom domain is one resource in AWS, reachable through both APIs, so these read and write
+    // the same records the v1 endpoints do. That also means a domain created here resolves through
+    // the Host-header routing that already exists for v1.
+
+    @POST
+    @Path("/v2/domainnames")
+    public Response createV2DomainName(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        Map<String, Object> request = readJsonBody(body);
+        // HTTP APIs require exactly one configuration, where the REST API takes none at all.
+        if (!(request.get("domainNameConfigurations") instanceof List<?> configurations)
+                || configurations.size() != 1) {
+            throw new AwsException("BadRequestException",
+                    "Invalid input. Expected one domain name configuration", 400);
+        }
+        rejectUnemulatedDomainInputs(request, (Map<?, ?>) configurations.getFirst());
+        CustomDomain domain = service.createDomainName(region, toV1DomainRequest(request));
+        return Response.status(201).entity(toV2DomainNode(region, domain).toString())
+                .type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/v2/domainnames")
+    public Response getV2DomainNames(@Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("items");
+        service.getDomainNames(region).forEach(d -> items.add(toV2DomainNode(region, d)));
+        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/v2/domainnames/{domainName}")
+    public Response getV2DomainName(@Context HttpHeaders headers, @PathParam("domainName") String domainName) {
+        String region = regionResolver.resolveRegion(headers);
+        CustomDomain domain = service.getDomainName(region, domainName);
+        return Response.ok(toV2DomainNode(region, domain).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @DELETE
+    @Path("/v2/domainnames/{domainName}")
+    public Response deleteV2DomainName(@Context HttpHeaders headers, @PathParam("domainName") String domainName) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteDomainName(region, domainName);
+        return Response.noContent().build();
+    }
+
+    // ──────────────────────────── API Mappings (v2) ────────────────────────────
+
+    @POST
+    @Path("/v2/domainnames/{domainName}/apimappings")
+    public Response createApiMapping(@Context HttpHeaders headers,
+                                     @PathParam("domainName") String domainName,
+                                     String body) {
+        String region = regionResolver.resolveRegion(headers);
+        Map<String, Object> request = readJsonBody(body);
+        if (request.get("apiId") == null || request.get("stage") == null) {
+            throw new AwsException("BadRequestException", "apiId and stage are required", 400);
+        }
+        Map<String, Object> v1Request = new HashMap<>();
+        v1Request.put("restApiId", request.get("apiId"));
+        v1Request.put("stage", request.get("stage"));
+        if (request.get("apiMappingKey") != null) {
+            v1Request.put("basePath", request.get("apiMappingKey"));
+        }
+        BasePathMapping mapping = service.createBasePathMapping(region, domainName, v1Request);
+        return Response.status(201).entity(toApiMappingNode(mapping).toString())
+                .type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/v2/domainnames/{domainName}/apimappings")
+    public Response getApiMappings(@Context HttpHeaders headers, @PathParam("domainName") String domainName) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("items");
+        service.getBasePathMappings(region, domainName).forEach(m -> items.add(toApiMappingNode(m)));
+        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/v2/domainnames/{domainName}/apimappings/{apiMappingId}")
+    public Response getApiMapping(@Context HttpHeaders headers,
+                                  @PathParam("domainName") String domainName,
+                                  @PathParam("apiMappingId") String apiMappingId) {
+        String region = regionResolver.resolveRegion(headers);
+        return Response.ok(toApiMappingNode(findApiMapping(region, domainName, apiMappingId)).toString())
+                .type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @DELETE
+    @Path("/v2/domainnames/{domainName}/apimappings/{apiMappingId}")
+    public Response deleteApiMapping(@Context HttpHeaders headers,
+                                     @PathParam("domainName") String domainName,
+                                     @PathParam("apiMappingId") String apiMappingId) {
+        String region = regionResolver.resolveRegion(headers);
+        BasePathMapping mapping = findApiMapping(region, domainName, apiMappingId);
+        service.deleteBasePathMapping(region, domainName, mapping.getBasePath());
+        return Response.noContent().build();
     }
 
     // ──────────────────────────── Route Responses (v2) ────────────────────────────
@@ -1720,6 +1825,122 @@ public class ApiGatewayController {
         node.put("type", k.getType());
         node.put("value", k.getValue());
         return node;
+    }
+
+    private Map<String, Object> readJsonBody(String body) {
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = objectMapper.readValue(body, Map.class);
+            return request;
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    /**
+     * Refuses the parts of a domain that floci does not emulate, rather than accepting them and
+     * answering with a domain that behaves differently from the one that was asked for.
+     */
+    private static void rejectUnemulatedDomainInputs(Map<String, Object> request, Map<?, ?> configuration) {
+        Object routingMode = request.get("routingMode");
+        if (routingMode != null && !"API_MAPPING_ONLY".equals(routingMode)) {
+            throw new AwsException("BadRequestException",
+                    "Only API_MAPPING_ONLY routing is supported", 400);
+        }
+        if (request.get("mutualTlsAuthentication") != null) {
+            throw new AwsException("BadRequestException",
+                    "Mutual TLS authentication is not supported", 400);
+        }
+        Object ipAddressType = configuration.get("ipAddressType");
+        if (ipAddressType != null && !"ipv4".equals(ipAddressType)) {
+            throw new AwsException("BadRequestException",
+                    "Only the ipv4 address type is supported", 400);
+        }
+        if (configuration.get("ownershipVerificationCertificateArn") != null) {
+            throw new AwsException("BadRequestException",
+                    "Ownership verification certificates are not supported", 400);
+        }
+    }
+
+    /** Flattens the v2 request onto the keys the shared custom-domain store is written with. */
+    private Map<String, Object> toV1DomainRequest(Map<String, Object> request) {
+        Map<String, Object> v1Request = new HashMap<>();
+        v1Request.put("domainName", request.get("domainName"));
+        copyIfPresent(request, v1Request, "tags", "tags");
+        if (request.get("domainNameConfigurations") instanceof List<?> configurations
+                && !configurations.isEmpty()
+                && configurations.getFirst() instanceof Map<?, ?> configuration) {
+            copyIfPresent(configuration, v1Request, "certificateArn", "certificateArn");
+            copyIfPresent(configuration, v1Request, "certificateName", "certificateName");
+            copyIfPresent(configuration, v1Request, "endpointType", "endpointType");
+            copyIfPresent(configuration, v1Request, "securityPolicy", "securityPolicy");
+        }
+        return v1Request;
+    }
+
+    private static void copyIfPresent(Map<?, ?> source, Map<String, Object> target, String from, String to) {
+        Object value = source.get(from);
+        if (value != null) {
+            target.put(to, value);
+        }
+    }
+
+    private ObjectNode toV2DomainNode(String region, CustomDomain d) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("domainName", d.getDomainName());
+        node.put("domainNameArn", "arn:aws:apigateway:" + region + "::/domainnames/" + d.getDomainName());
+        node.put("apiMappingSelectionExpression", "$request.basepath");
+        // AWS reports both of these on every domain.
+        node.put("routingMode", "API_MAPPING_ONLY");
+
+        ObjectNode configuration = objectMapper.createObjectNode();
+        configuration.put("apiGatewayDomainName", d.getRegionalDomainName());
+        configuration.put("hostedZoneId", d.getRegionalHostedZoneId());
+        configuration.put("endpointType", d.getEndpointConfigurationType());
+        configuration.put("domainNameStatus", d.getDomainNameStatus());
+        configuration.put("ipAddressType", "ipv4");
+        if (d.getCertificateArn() != null) {
+            configuration.put("certificateArn", d.getCertificateArn());
+        }
+        if (d.getCertificateName() != null) {
+            configuration.put("certificateName", d.getCertificateName());
+        }
+        if (d.getSecurityPolicy() != null) {
+            configuration.put("securityPolicy", d.getSecurityPolicy());
+        }
+        node.putArray("domainNameConfigurations").add(configuration);
+        if (d.getTags() != null && !d.getTags().isEmpty()) {
+            ObjectNode tags = node.putObject("tags");
+            d.getTags().forEach(tags::put);
+        }
+        return node;
+    }
+
+    private ObjectNode toApiMappingNode(BasePathMapping mapping) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("apiMappingId", apiMappingId(mapping));
+        node.put("apiId", mapping.getRestApiId());
+        node.put("stage", mapping.getStage());
+        // v1 stores the root mapping as "(none)"; v2 expresses it as an empty key.
+        node.put("apiMappingKey", "(none)".equals(mapping.getBasePath()) ? "" : mapping.getBasePath());
+        return node;
+    }
+
+    /**
+     * Derives the mapping id from what identifies the mapping, so it survives a restart and is the
+     * same id whether the mapping was created through the v1 or the v2 endpoint.
+     */
+    private static String apiMappingId(BasePathMapping mapping) {
+        String basePath = mapping.getBasePath() == null ? "(none)" : mapping.getBasePath();
+        return Integer.toHexString(basePath.hashCode()).replace("-", "0");
+    }
+
+    private BasePathMapping findApiMapping(String region, String domainName, String apiMappingId) {
+        return service.getBasePathMappings(region, domainName).stream()
+                .filter(m -> apiMappingId(m).equals(apiMappingId))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Unable to find ApiMapping with ID " + apiMappingId, 404));
     }
 
     private ObjectNode toDomainNode(CustomDomain d) {

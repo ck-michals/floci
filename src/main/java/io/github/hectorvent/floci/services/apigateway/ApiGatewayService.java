@@ -940,8 +940,8 @@ public class ApiGatewayService {
         // AWS enforces global uniqueness of custom domain names across all regions
         boolean exists = !domainStore.scan(k -> k.endsWith("::" + domainName)).isEmpty();
         if (exists) {
-            throw new AwsException("ConflictException",
-                    "The domain name you provided already exists.", 409);
+            throw new AwsException("BadRequestException",
+                    "The domain name you provided already exists.", 400);
         }
 
         CustomDomain domain = new CustomDomain();
@@ -950,15 +950,43 @@ public class ApiGatewayService {
         domain.setCertificateArn((String) request.get("certificateArn"));
         domain.setRegionalDomainName(domainName + ".regional.local");
         domain.setRegionalHostedZoneId("Z2FDTNDATAQYL2");
+        domain.setEndpointConfigurationType(endpointTypeOf(request));
+        domain.setSecurityPolicy((String) request.getOrDefault("securityPolicy", "TLS_1_2"));
+        // Nothing is provisioned behind the domain, so it is usable as soon as it exists.
+        domain.setDomainNameStatus("AVAILABLE");
+        if (request.get("tags") instanceof Map<?, ?> tags && !tags.isEmpty()) {
+            Map<String, String> copied = new java.util.LinkedHashMap<>();
+            tags.forEach((key, value) -> copied.put(String.valueOf(key), String.valueOf(value)));
+            domain.setTags(copied);
+        }
 
         domainStore.put(domainKey(region, domainName), domain);
         LOG.infov("Created custom domain {0} in {1}", domainName, region);
         return domain;
     }
 
+    /**
+     * Reads the endpoint type from either spelling: REST passes {@code endpointConfiguration.types},
+     * HTTP APIs pass a single {@code endpointType}. REGIONAL is the default an emulated domain gets,
+     * since nothing here fronts it with an edge distribution.
+     */
+    private static String endpointTypeOf(Map<String, Object> request) {
+        Object endpointType = request.get("endpointType");
+        if (endpointType instanceof String type && !type.isBlank()) {
+            return type;
+        }
+        if (request.get("endpointConfiguration") instanceof Map<?, ?> configuration
+                && configuration.get("types") instanceof List<?> types && !types.isEmpty()
+                && types.getFirst() instanceof String type && !type.isBlank()) {
+            return type;
+        }
+        return "REGIONAL";
+    }
+
     public CustomDomain getDomainName(String region, String domainName) {
         return domainStore.get(domainKey(region, domainName))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Domain name not found", 404));
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Invalid domain name identifier specified", 404));
     }
 
     public List<CustomDomain> getDomainNames(String region) {
@@ -986,6 +1014,19 @@ public class ApiGatewayService {
         basePathMappingStore.put(mappingKey(region, domainName, basePath), mapping);
         LOG.infov("Created mapping for {0} path={1} -> API {2}", domainName, basePath, apiId);
         return mapping;
+    }
+
+    /**
+     * Refuses to let an API go while a custom domain still maps to it, which is what AWS answers:
+     * the mapping would otherwise be left pointing at an API that no longer exists.
+     */
+    public void requireNoApiMappings(String region, String apiId) {
+        boolean mapped = basePathMappingStore.scan(k -> k.startsWith(region + "::")).stream()
+                .anyMatch(mapping -> apiId.equals(mapping.getRestApiId()));
+        if (mapped) {
+            throw new AwsException("BadRequestException", "Deleting API " + apiId
+                    + " failed. Please remove all API mappings for the API from your custom domain names.", 400);
+        }
     }
 
     public BasePathMapping getBasePathMapping(String region, String domainName, String basePath) {
