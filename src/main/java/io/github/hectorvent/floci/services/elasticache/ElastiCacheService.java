@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
+import io.github.hectorvent.floci.services.elasticache.model.CacheParameterGroup;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
@@ -18,12 +19,15 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 /**
  * Core ElastiCache business logic — replication groups and users.
@@ -36,11 +40,13 @@ public class ElastiCacheService {
 
     private final StorageBackend<String, ReplicationGroup> groups;
     private final StorageBackend<String, ElastiCacheUser> users;
+    private final StorageBackend<String, CacheParameterGroup> parameterGroups;
     private final ElastiCacheContainerManager containerManager;
     private final ElastiCacheProxyManager proxyManager;
     private final EmulatorConfig config;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final Set<String> provisioningGroupIds = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, Object> parameterGroupLocks = new ConcurrentHashMap<>();
 
     @Inject
     public ElastiCacheService(ElastiCacheContainerManager containerManager,
@@ -54,6 +60,8 @@ public class ElastiCacheService {
                 new TypeReference<Map<String, ReplicationGroup>>() {});
         this.users = storageFactory.create("elasticache", "elasticache-users.json",
                 new TypeReference<Map<String, ElastiCacheUser>>() {});
+        this.parameterGroups = storageFactory.create("elasticache", "elasticache-parameter-groups.json",
+                new TypeReference<Map<String, CacheParameterGroup>>() {});
     }
 
     public ReplicationGroup createReplicationGroup(String groupId, String description,
@@ -311,5 +319,137 @@ public class ElastiCacheService {
 
     private void releaseProxyPort(int port) {
         usedPorts.remove(port);
+    }
+
+    // ── Cache Parameter Groups ────────────────────────────────────────────────
+
+    /** The families AWS accepts, and validates a create against. */
+    private static final List<String> PARAMETER_GROUP_FAMILIES = List.of(
+            "memcached1.4", "memcached1.5", "memcached1.6",
+            "redis2.6", "redis2.8", "redis3.2", "redis4.0", "redis5.0", "redis6.x", "redis7",
+            "valkey7", "valkey8", "valkey9");
+
+    /** The families AWS also publishes a cluster-mode default for. */
+    private static final List<String> CLUSTER_MODE_FAMILIES = List.of(
+            "redis3.2", "redis4.0", "redis5.0", "redis6.x", "redis7", "valkey7", "valkey8", "valkey9");
+
+    /**
+     * Names begin with a letter and hold only letters, digits and single interior hyphens. AWS
+     * applies this to deletes as well as creates, which is why a {@code default.*} group cannot be
+     * deleted: the dot fails this rule before anything looks the group up.
+     */
+    private static final Pattern PARAMETER_GROUP_NAME =
+            Pattern.compile("^[a-zA-Z][a-zA-Z0-9]*(-[a-zA-Z0-9]+)*$");
+
+    /**
+     * The {@code default.*} groups AWS publishes. Derived rather than stored: nothing can modify or
+     * delete them, so persisting them would only add records to migrate, a writer to race, and an
+     * install predating this that needs backfilling.
+     */
+    private static List<CacheParameterGroup> defaultParameterGroups() {
+        List<CacheParameterGroup> defaults = new ArrayList<>();
+        for (String family : PARAMETER_GROUP_FAMILIES) {
+            defaults.add(new CacheParameterGroup("default." + family, family,
+                    "Default parameter group for " + family));
+            if (CLUSTER_MODE_FAMILIES.contains(family)) {
+                defaults.add(new CacheParameterGroup("default." + family + ".cluster.on", family,
+                        "Customized default parameter group for " + family + " with cluster mode on"));
+            }
+        }
+        return defaults;
+    }
+
+    private static void validateParameterGroupName(String name) {
+        if (name == null || name.isBlank() || !PARAMETER_GROUP_NAME.matcher(name).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "The parameter CacheParameterGroupName is not a valid identifier. Identifiers must "
+                            + "begin with a letter; must contain only ASCII letters, digits, and hyphens; "
+                            + "and must not end with a hyphen or contain two consecutive hyphens.", 400);
+        }
+    }
+
+    /**
+     * One monitor per group name, taken by every writer before it reads. Guarding the record itself
+     * would be too late: a create has no record yet, so two of them could both pass the existence
+     * check, and a modify that resolved its record before locking would write back one a concurrent
+     * delete had already removed.
+     */
+    private Object lockFor(String parameterGroupName) {
+        return parameterGroupLocks.computeIfAbsent(parameterGroupName, key -> new Object());
+    }
+
+    public CacheParameterGroup createCacheParameterGroup(String name, String family,
+                                                         String description, Map<String, String> tags) {
+        validateParameterGroupName(name);
+        if (family == null || !PARAMETER_GROUP_FAMILIES.contains(family)) {
+            throw new AwsException("InvalidParameterValue",
+                    "CacheParameterGroupFamily " + family + " is not a valid parameter group family.", 400);
+        }
+
+        synchronized (lockFor(name)) {
+            if (parameterGroups.get(name).isPresent()) {
+                throw new AwsException("CacheParameterGroupAlreadyExists",
+                        "Parameter group " + name + " already exists", 400);
+            }
+            CacheParameterGroup group = new CacheParameterGroup(name, family, description);
+            if (tags != null) {
+                group.setTags(new LinkedHashMap<>(tags));
+            }
+            parameterGroups.put(name, group);
+            LOG.infov("Created cache parameter group {0} ({1})", name, family);
+            return group;
+        }
+    }
+
+    /** Every group, or the one named. The published defaults are listed, as AWS lists them. */
+    public List<CacheParameterGroup> describeCacheParameterGroups(String name) {
+        if (name == null || name.isBlank()) {
+            List<CacheParameterGroup> all = new ArrayList<>(defaultParameterGroups());
+            all.addAll(parameterGroups.scan(key -> true));
+            return all;
+        }
+        return List.of(requireParameterGroup(name));
+    }
+
+    public CacheParameterGroup requireParameterGroup(String name) {
+        return parameterGroups.get(name)
+                .or(() -> defaultParameterGroups().stream()
+                        .filter(group -> group.getName().equals(name))
+                        .findFirst())
+                .orElseThrow(() -> new AwsException("CacheParameterGroupNotFound",
+                        "CacheParameterGroup " + name + " not found.", 404));
+    }
+
+    /**
+     * Records the parameters a caller sets. floci does not carry AWS's per-family catalogue of
+     * parameter names, so it cannot tell a real name from a typo and does not try: rejecting names
+     * missing from a partial catalogue would refuse configurations AWS accepts.
+     */
+    public void modifyCacheParameterGroup(String name, Map<String, String> parameters) {
+        requireParameterGroup(name);
+        synchronized (lockFor(name)) {
+            // Read inside the lock: a record resolved before it could have been deleted since, and
+            // writing it back would restore the group the delete removed.
+            CacheParameterGroup group = parameterGroups.get(name)
+                    .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                            "The parameter group " + name + " is a default group and cannot be modified.", 400));
+            Map<String, String> updated = new LinkedHashMap<>(group.getParameters());
+            updated.putAll(parameters);
+            group.setParameters(updated);
+            parameterGroups.put(name, group);
+        }
+        LOG.debugv("Modified {0} parameter(s) on cache parameter group {1}", parameters.size(), name);
+    }
+
+    public void deleteCacheParameterGroup(String name) {
+        validateParameterGroupName(name);
+        synchronized (lockFor(name)) {
+            if (parameterGroups.get(name).isEmpty()) {
+                throw new AwsException("CacheParameterGroupNotFound",
+                        "CacheParameterGroupnot found: " + name, 404);
+            }
+            parameterGroups.delete(name);
+        }
+        LOG.infov("Deleted cache parameter group {0}", name);
     }
 }

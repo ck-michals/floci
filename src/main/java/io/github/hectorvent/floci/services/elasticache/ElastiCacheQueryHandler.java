@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
+import io.github.hectorvent.floci.services.elasticache.model.CacheParameterGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
@@ -20,7 +21,9 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Query-protocol handler for all ElastiCache actions (form-encoded POST, XML response).
@@ -63,7 +66,12 @@ public class ElastiCacheQueryHandler {
             case "DescribeCacheClusters"      -> handleDescribeCacheClusters(params);
             case "DeleteCacheCluster"         -> handleDeleteCacheCluster(params);
             case "DescribeCacheSubnetGroups"  -> handleDescribeCacheSubnetGroups(params);
+            case "CreateCacheParameterGroup" -> handleCreateCacheParameterGroup(params);
             case "DescribeCacheParameterGroups" -> handleDescribeCacheParameterGroups(params);
+            case "ModifyCacheParameterGroup" -> handleModifyCacheParameterGroup(params);
+            case "DescribeCacheParameters" -> handleDescribeCacheParameters(params);
+            case "DeleteCacheParameterGroup" -> handleDeleteCacheParameterGroup(params);
+            case "ListTagsForResource" -> handleListTagsForResource(params);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.EC, 400);
         };
@@ -292,11 +300,147 @@ public class ElastiCacheQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("DescribeCacheSubnetGroups", AwsNamespaces.EC, xml.build())).build();
     }
 
+    private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> params) {
+        try {
+            CacheParameterGroup group = service.createCacheParameterGroup(
+                    params.getFirst("CacheParameterGroupName"),
+                    params.getFirst("CacheParameterGroupFamily"),
+                    params.getFirst("Description"),
+                    parseTags(params));
+            var xml = new XmlBuilder();
+            appendParameterGroup(xml, group);
+            return Response.ok(AwsQueryResponse.envelope("CreateCacheParameterGroup", AwsNamespaces.EC, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
     private Response handleDescribeCacheParameterGroups(MultivaluedMap<String, String> params) {
-        // Cache parameter groups are not modeled by the emulator; return the wire-accurate
-        // empty result so SDK clients get a valid 200 instead of an unsupported-action 400.
-        var xml = new XmlBuilder().start("CacheParameterGroups").end("CacheParameterGroups");
-        return Response.ok(AwsQueryResponse.envelope("DescribeCacheParameterGroups", AwsNamespaces.EC, xml.build())).build();
+        try {
+            List<CacheParameterGroup> groups =
+                    service.describeCacheParameterGroups(params.getFirst("CacheParameterGroupName"));
+            var xml = new XmlBuilder().start("CacheParameterGroups");
+            groups.forEach(group -> appendParameterGroup(xml, group));
+            xml.end("CacheParameterGroups");
+            return Response.ok(AwsQueryResponse.envelope("DescribeCacheParameterGroups", AwsNamespaces.EC, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleModifyCacheParameterGroup(MultivaluedMap<String, String> params) {
+        try {
+            String name = params.getFirst("CacheParameterGroupName");
+            service.modifyCacheParameterGroup(name, parseParameterNameValues(params));
+            var xml = new XmlBuilder().elem("CacheParameterGroupName", name);
+            return Response.ok(AwsQueryResponse.envelope("ModifyCacheParameterGroup", AwsNamespaces.EC, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDescribeCacheParameters(MultivaluedMap<String, String> params) {
+        try {
+            CacheParameterGroup group = service.requireParameterGroup(params.getFirst("CacheParameterGroupName"));
+            // floci stores only what a caller set, so every parameter it can report has source "user".
+            // A request for another source gets the empty list rather than invented defaults.
+            String source = params.getFirst("Source");
+            boolean includeUserParameters = source == null || source.isBlank() || "user".equals(source);
+
+            var xml = new XmlBuilder().start("Parameters");
+            if (includeUserParameters) {
+                group.getParameters().forEach((name, value) -> xml
+                        .start("Parameter")
+                        .elem("ParameterName", name)
+                        .elem("ParameterValue", value)
+                        .elem("Source", "user")
+                        .elem("IsModifiable", true)
+                        .end("Parameter"));
+            }
+            xml.end("Parameters")
+                    .start("CacheNodeTypeSpecificParameters").end("CacheNodeTypeSpecificParameters");
+            return Response.ok(AwsQueryResponse.envelope("DescribeCacheParameters", AwsNamespaces.EC, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    /**
+     * Tags for a resource ARN. Only parameter groups carry tags in floci, so any other ARN reports
+     * none — which is what floci knows, rather than a guess at what AWS would hold.
+     */
+    private Response handleListTagsForResource(MultivaluedMap<String, String> params) {
+        try {
+            String resourceName = params.getFirst("ResourceName");
+            Map<String, String> tags = Map.of();
+            if (resourceName != null && resourceName.contains(":parametergroup:")) {
+                String name = resourceName.substring(resourceName.lastIndexOf(':') + 1);
+                tags = service.requireParameterGroup(name).getTags();
+            }
+            var xml = new XmlBuilder().start("TagList");
+            tags.forEach((key, value) -> xml.start("Tag")
+                    .elem("Key", key)
+                    .elem("Value", value)
+                    .end("Tag"));
+            xml.end("TagList");
+            return Response.ok(AwsQueryResponse.envelope("ListTagsForResource", AwsNamespaces.EC, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDeleteCacheParameterGroup(MultivaluedMap<String, String> params) {
+        try {
+            service.deleteCacheParameterGroup(params.getFirst("CacheParameterGroupName"));
+            return Response.ok(AwsQueryResponse.envelope("DeleteCacheParameterGroup", AwsNamespaces.EC, "")).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private void appendParameterGroup(XmlBuilder xml, CacheParameterGroup group) {
+        xml.start("CacheParameterGroup")
+                .elem("CacheParameterGroupName", group.getName())
+                .elem("CacheParameterGroupFamily", group.getFamily())
+                .elem("Description", group.getDescription())
+                .elem("IsGlobal", false)
+                .elem("ARN", parameterGroupArn(group.getName()))
+                .end("CacheParameterGroup");
+    }
+
+    private String parameterGroupArn(String name) {
+        return "arn:aws:elasticache:" + regionResolver.getRegion() + ":"
+                + regionResolver.getAccountId() + ":parametergroup:" + name;
+    }
+
+    /**
+     * Reads a Query-protocol list of pairs under every spelling it arrives in. The member element
+     * takes its name from the shape's {@code locationName} — {@code Tag} and
+     * {@code ParameterNameValue} here, not {@code member} — and SDKs differ, so each is tried.
+     */
+    private static Map<String, String> parsePairs(MultivaluedMap<String, String> params,
+                                                  List<String> prefixes, String keyName, String valueName) {
+        Map<String, String> pairs = new LinkedHashMap<>();
+        for (String prefix : prefixes) {
+            for (int i = 1; ; i++) {
+                String key = params.getFirst(prefix + "." + i + "." + keyName);
+                if (key == null) {
+                    break;
+                }
+                pairs.put(key, params.getFirst(prefix + "." + i + "." + valueName));
+            }
+        }
+        return pairs;
+    }
+
+    private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {
+        return parsePairs(params, List.of("Tags.Tag", "Tags.member", "Tag"), "Key", "Value");
+    }
+
+    private static Map<String, String> parseParameterNameValues(MultivaluedMap<String, String> params) {
+        return parsePairs(params,
+                List.of("ParameterNameValues.ParameterNameValue", "ParameterNameValues.member"),
+                "ParameterName", "ParameterValue");
     }
 
     // ── IAM Token Validation ──────────────────────────────────────────────────
