@@ -753,8 +753,9 @@ public class RdsService implements Resettable {
                 continue;
             }
             try {
-                secretsManagerService.markOwnedByService(
-                        secretArn, MANAGED_SECRET_OWNING_SERVICE, regionFromArn(secretArn));
+                // The secret's ARN names its own account and region, neither of which a startup
+                // backfill has a request context to infer.
+                secretsManagerService.markOwnedByService(secretArn, MANAGED_SECRET_OWNING_SERVICE);
             } catch (RuntimeException e) {
                 LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
             }

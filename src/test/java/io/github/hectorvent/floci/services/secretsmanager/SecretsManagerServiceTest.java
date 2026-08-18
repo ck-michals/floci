@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
@@ -354,7 +355,8 @@ class SecretsManagerServiceTest {
 
         assertTrue(rotated.isRotationEnabled());
         assertEquals(7, rotated.getRotationRules().automaticallyAfterDays());
-        assertNotNull(rotated.getLastRotatedDate());
+        // floci does not re-issue the credential, so it must not claim a rotation happened.
+        assertNull(rotated.getLastRotatedDate());
         assertNull(rotated.getRotationLambdaArn());
         // No Lambda exists to drive the rotation lifecycle, so none may be invoked.
         org.mockito.Mockito.verifyNoInteractions(mockLambda);
@@ -376,12 +378,12 @@ class SecretsManagerServiceTest {
     @Test
     void markOwnedByServiceLetsAPersistedSecretRotateAsManaged() {
         // A secret stored before floci tracked ownership deserializes without an owning service.
-        service.createSecret("rds!db-1234", "value", null, null, null, null, REGION);
+        String arn = service.createSecret("rds!db-1234", "value", null, null, null, null, REGION).getArn();
         assertThrows(AwsException.class, () ->
                 service.rotateSecret("rds!db-1234", null, null,
                         new Secret.RotationRules(7, null, null), true, REGION));
 
-        service.markOwnedByService("rds!db-1234", "rds", REGION);
+        service.markOwnedByService(arn, "rds");
 
         assertEquals("rds", service.describeSecret("rds!db-1234", REGION).getOwningService());
         assertTrue(service.rotateSecret("rds!db-1234", null, null,
@@ -390,13 +392,39 @@ class SecretsManagerServiceTest {
 
     @Test
     void markOwnedByServiceKeepsAnExistingOwnerAndToleratesAMissingSecret() {
-        service.createSecret("rds!db-1234", "value", null, null, null, null, "rds", REGION);
+        String arn = service.createSecret("rds!db-1234", "value", null, null, null, null, "rds", REGION).getArn();
 
-        service.markOwnedByService("rds!db-1234", "redshift", REGION);
+        service.markOwnedByService(arn, "redshift");
         assertEquals("rds", service.describeSecret("rds!db-1234", REGION).getOwningService());
 
-        // A backfill runs over whatever state it finds, so a secret that is gone is not an error.
-        assertDoesNotThrow(() -> service.markOwnedByService("no-such-secret", "rds", REGION));
+        // A backfill runs over whatever state it finds, so neither a secret that is gone nor a
+        // malformed ARN is an error.
+        assertDoesNotThrow(() -> service.markOwnedByService(
+                "arn:aws:secretsmanager:" + REGION + ":000000000000:secret:no-such-secret-AbCdEf", "rds"));
+        assertDoesNotThrow(() -> service.markOwnedByService("not-an-arn", "rds"));
+    }
+
+    @Test
+    void markOwnedByServiceAddressesTheAccountNamedInTheArn() {
+        // A backfill runs at startup, outside any request, so the store resolves the default
+        // account unless the ARN's account is used. Secrets of other accounts must still be found,
+        // and a same-named default-account secret must be left alone.
+        AccountAwareStorageBackend<Secret> accountAware =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        SecretsManagerService svc = new SecretsManagerService(accountAware, 30);
+
+        Secret otherAccount = new Secret();
+        otherAccount.setName("rds!db-1234");
+        otherAccount.setArn("arn:aws:secretsmanager:" + REGION + ":111122223333:secret:rds!db-1234-AbCdEf");
+        accountAware.putForAccount("111122223333", REGION + "::rds!db-1234", otherAccount);
+
+        Secret sameNameHere = svc.createSecret("rds!db-1234", "value", null, null, null, null, REGION);
+
+        svc.markOwnedByService(otherAccount.getArn(), "rds");
+
+        assertEquals("rds",
+                accountAware.getForAccount("111122223333", REGION + "::rds!db-1234").orElseThrow().getOwningService());
+        assertNull(sameNameHere.getOwningService());
     }
 
     @Test

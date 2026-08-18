@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.secretsmanager;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
@@ -31,6 +33,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Predicate;
 
 @ApplicationScoped
 public class SecretsManagerService {
@@ -307,31 +310,54 @@ public class SecretsManagerService {
     }
 
     /**
-     * Marks an existing secret as owned by an AWS service, so that it rotates the way a
+     * Marks the secret with this ARN as owned by an AWS service, so that it rotates the way a
      * service-managed secret does. Ownership is normally set when the owning service creates the
      * secret; this backfills secrets persisted before floci tracked it. A secret that is already
      * owned, or that no longer exists, is left as it is.
+     *
+     * <p>A backfill runs outside any request, so the account cannot come from the request context:
+     * the secret's own ARN names the account whose store holds it, and that is the store this
+     * addresses. Passing a name instead of an ARN would read the wrong account.
      */
-    public void markOwnedByService(String secretId, String owningService, String region) {
-        Secret resolved;
+    public void markOwnedByService(String secretArn, String owningService) {
+        if (secretArn == null || !secretArn.startsWith("arn:")) {
+            return;
+        }
+        AwsArnUtils.Arn arn;
         try {
-            resolved = resolveSecret(secretId, region);
-        } catch (AwsException e) {
-            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
-                return;
-            }
-            throw e;
+            arn = AwsArnUtils.parse(secretArn);
+        } catch (IllegalArgumentException e) {
+            LOG.debugv("Ignoring malformed secret ARN during ownership backfill: {0}", secretArn);
+            return;
         }
 
-        synchronized (lockFor(resolved.getArn())) {
-            Secret secret = resolveSecret(resolved.getArn(), region);
-            if (secret.getOwningService() != null) {
+        synchronized (lockFor(secretArn)) {
+            Secret secret = findByArnInAccount(secretArn, arn);
+            if (secret == null || secret.getOwningService() != null) {
                 return;
             }
             secret.setOwningService(owningService);
-            store.put(regionKey(region, secret.getName()), secret);
-            LOG.infov("Marked secret {0} as owned by {1}", secret.getName(), owningService);
+            String key = regionKey(arn.region(), secret.getName());
+            if (store instanceof AccountAwareStorageBackend<Secret> aware) {
+                aware.putForAccount(arn.accountId(), key, secret);
+            } else {
+                store.put(key, secret);
+            }
+            LOG.infov("Marked secret {0} in account {1} as owned by {2}",
+                    secret.getName(), arn.accountId(), owningService);
         }
+    }
+
+    /** Finds a secret by full ARN within the account and region that ARN names. */
+    private Secret findByArnInAccount(String secretArn, AwsArnUtils.Arn arn) {
+        Predicate<String> inRegion = key -> key.startsWith(arn.region() + "::");
+        List<Secret> candidates = store instanceof AccountAwareStorageBackend<Secret> aware
+                ? aware.scanForAccount(arn.accountId(), inRegion)
+                : store.scan(inRegion);
+        return candidates.stream()
+                .filter(s -> secretArn.equals(s.getArn()))
+                .findFirst()
+                .orElse(null);
     }
 
     /**
@@ -618,13 +644,11 @@ public class SecretsManagerService {
                 secret.setRotationRules(rotationRules);
             }
             secret.setRotationEnabled(true);
-            Instant now = Instant.now();
-            secret.setLastChangedDate(now);
-            // The owning service rotates in place, so record it as done rather than staging a
-            // pending version for a Lambda that will never run.
-            if (serviceManaged && rotateImmediately) {
-                secret.setLastRotatedDate(now);
-            }
+            secret.setLastChangedDate(Instant.now());
+            // A service-managed secret is rotated by its owning service, which floci does not
+            // emulate: the master password is not re-issued here, so nothing sets LastRotatedDate.
+            // Reporting a rotation that did not happen would leave GetSecretValue and the database
+            // holding a credential the secret claims to have replaced.
 
             store.put(regionKey(region, secret.getName()), secret);
         }

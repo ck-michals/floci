@@ -332,7 +332,7 @@ class RdsServiceTest {
         // secret, which is what makes that secret managed — the name never is.
         service.backfillManagedSecretOwnership(null);
 
-        verify(secretsManager).markOwnedByService(secretArn, "rds", "us-east-1");
+        verify(secretsManager).markOwnedByService(secretArn, "rds");
     }
 
     @Test
@@ -349,7 +349,7 @@ class RdsServiceTest {
 
         service.backfillManagedSecretOwnership(null);
 
-        verify(secretsManager, never()).markOwnedByService(any(), any(), any());
+        verify(secretsManager, never()).markOwnedByService(any(), any());
     }
 
     @Test
