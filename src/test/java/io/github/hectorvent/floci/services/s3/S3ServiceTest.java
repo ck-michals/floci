@@ -753,4 +753,109 @@ class S3ServiceTest {
                 assertInstanceOf(S3Service.WebsiteResolution.ErrorDocument.class,
                         s3Service.resolveWebsiteError("site", UNSIGNED, 500)).status());
     }
+
+    @Test
+    void metricsConfigurationsOnABucketWithoutAnyBehaveAsEmpty() {
+        // A bucket persisted before this field existed deserializes with a null map, which is the
+        // same shape a freshly created bucket has, so neither may fault.
+        s3Service.createBucket("no-metrics", "us-east-1");
+
+        assertTrue(s3Service.listBucketMetricsConfigurations("no-metrics")
+                .contains("<IsTruncated>false</IsTruncated>"));
+        assertEquals("NoSuchConfiguration", assertThrows(AwsException.class,
+                () -> s3Service.getBucketMetricsConfiguration("no-metrics", "any")).getErrorCode());
+        assertEquals("NoSuchConfiguration", assertThrows(AwsException.class,
+                () -> s3Service.deleteBucketMetricsConfiguration("no-metrics", "any")).getErrorCode());
+
+        // And the first put still lands on it.
+        s3Service.putBucketMetricsConfiguration("no-metrics", "first", "<Id>first</Id>");
+        assertTrue(s3Service.getBucketMetricsConfiguration("no-metrics", "first")
+                .contains("<Id>first</Id>"));
+    }
+
+    @Test
+    void metricsConfigurationsDoNotOutliveTheirBucket() {
+        s3Service.createBucket("recycled", "us-east-1");
+        s3Service.putBucketMetricsConfiguration("recycled", "old", "<Id>old</Id>");
+        s3Service.deleteBucket("recycled");
+
+        s3Service.createBucket("recycled", "us-east-1");
+
+        assertEquals("NoSuchConfiguration", assertThrows(AwsException.class,
+                () -> s3Service.getBucketMetricsConfiguration("recycled", "old")).getErrorCode());
+    }
+
+    @Test
+    void metricsConfigurationsSurviveARestart() {
+        // Through the real storage layer rather than Jackson alone: written, flushed to disk, and
+        // read back by a second service over the same file, the way a restart does it.
+        Path bucketsFile = tempDir.resolve("s3-buckets.json");
+        var beforeRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
+                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        S3Service before = new S3Service(beforeRestart, new InMemoryStorage<>(), tempDir.resolve("s3a"), false);
+        before.createBucket("persisted-metrics", "us-east-1");
+        before.putBucketMetricsConfiguration("persisted-metrics", "EntireBucket", "<Id>EntireBucket</Id>");
+        beforeRestart.flush();
+        beforeRestart.shutdown();
+
+        var afterRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
+                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        afterRestart.load();
+        try {
+            S3Service after = new S3Service(afterRestart, new InMemoryStorage<>(), tempDir.resolve("s3a"), false);
+            assertTrue(after.getBucketMetricsConfiguration("persisted-metrics", "EntireBucket")
+                    .contains("<Id>EntireBucket</Id>"));
+        } finally {
+            afterRestart.shutdown();
+        }
+    }
+
+    @Test
+    void metricsConfigurationsSurviveAJacksonRoundTrip() throws Exception {
+        // Bucket records are persisted as JSON, so the configurations have to come back after a
+        // restart, and a record written before the field existed has to still load.
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+        Bucket bucket = new Bucket("persisted");
+        bucket.setMetricsConfigurations(new java.util.LinkedHashMap<>(
+                Map.of("EntireBucket", "<Id>EntireBucket</Id>")));
+
+        Bucket reloaded = mapper.readValue(mapper.writeValueAsString(bucket), Bucket.class);
+        assertEquals("<Id>EntireBucket</Id>", reloaded.getMetricsConfigurations().get("EntireBucket"));
+
+        Bucket legacy = mapper.readValue("{\"name\":\"legacy\"}", Bucket.class);
+        assertNull(legacy.getMetricsConfigurations());
+    }
+
+    @Test
+    void concurrentMetricsConfigurationPutsAllSurvive() throws Exception {
+        // Each put reads the configuration map, adds to it and writes it back, so without a shared
+        // monitor concurrent puts of different ids overwrite each other's work.
+        s3Service.createBucket("metrics-race", "us-east-1");
+        int count = 24;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(8);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        try {
+            var submitted = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (int i = 0; i < count; i++) {
+                String id = "config-" + i;
+                submitted.add(pool.submit(() -> {
+                    start.await();
+                    s3Service.putBucketMetricsConfiguration("metrics-race", id, "<Id>" + id + "</Id>");
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (var future : submitted) {
+                future.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        String listed = s3Service.listBucketMetricsConfigurations("metrics-race");
+        for (int i = 0; i < count; i++) {
+            assertTrue(listed.contains("<Id>config-" + i + "</Id>"),
+                    "configuration config-" + i + " was lost by a concurrent put");
+        }
+    }
 }

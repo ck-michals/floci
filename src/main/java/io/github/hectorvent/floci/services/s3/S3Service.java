@@ -1634,6 +1634,86 @@ public class S3Service implements Resettable {
         LOG.debugv("Deleted tags from bucket: {0}", bucketName);
     }
 
+    // --- Metrics Configurations ---
+
+    private static final String METRICS_XMLNS = "http://s3.amazonaws.com/doc/2006-03-01/";
+
+    /**
+     * Stores a CloudWatch request metrics configuration under {@code id}, replacing any
+     * configuration already stored under it. floci records the configuration and returns it; no
+     * metrics are produced from it.
+     */
+    public void putBucketMetricsConfiguration(String bucketName, String id, String innerXml) {
+        Bucket bucket = requireBucket(bucketName);
+        // Read-modify-write of the bucket record, so it takes the same monitor as the other
+        // bucket-scoped mutations: without it two concurrent puts of different ids both start from
+        // the same map and one of the configurations is lost.
+        synchronized (bucket) {
+            Map<String, String> configurations = bucket.getMetricsConfigurations() != null
+                    ? new java.util.LinkedHashMap<>(bucket.getMetricsConfigurations())
+                    : new java.util.LinkedHashMap<>();
+            configurations.put(id, innerXml);
+            bucket.setMetricsConfigurations(configurations);
+            bucketStore.put(bucketName, bucket);
+        }
+        LOG.debugv("Put metrics configuration {0} on bucket: {1}", id, bucketName);
+    }
+
+    public String getBucketMetricsConfiguration(String bucketName, String id) {
+        Bucket bucket = requireBucket(bucketName);
+        String innerXml = bucket.getMetricsConfigurations() == null
+                ? null : bucket.getMetricsConfigurations().get(id);
+        if (innerXml == null) {
+            throw noSuchMetricsConfiguration();
+        }
+        return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                + "<MetricsConfiguration xmlns=\"" + METRICS_XMLNS + "\">" + innerXml + "</MetricsConfiguration>";
+    }
+
+    /**
+     * Lists every metrics configuration on the bucket. AWS pages these with a continuation token
+     * once there are more than 100; floci returns them all in one unpaged response, ordered by id
+     * so that the listing is stable.
+     */
+    public String listBucketMetricsConfigurations(String bucketName) {
+        Bucket bucket = requireBucket(bucketName);
+        Map<String, String> configurations = bucket.getMetricsConfigurations() != null
+                ? bucket.getMetricsConfigurations() : Map.of();
+
+        StringBuilder xml = new StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .append("<ListMetricsConfigurationsResult xmlns=\"").append(METRICS_XMLNS).append("\">");
+        configurations.keySet().stream().sorted().forEach(id ->
+                xml.append("<MetricsConfiguration>").append(configurations.get(id)).append("</MetricsConfiguration>"));
+        return xml.append("<IsTruncated>false</IsTruncated></ListMetricsConfigurationsResult>").toString();
+    }
+
+    public void deleteBucketMetricsConfiguration(String bucketName, String id) {
+        Bucket bucket = requireBucket(bucketName);
+        // Same monitor as the put: the existence check and the write have to be one step, or a
+        // concurrent put of another id is dropped by the write that follows it.
+        synchronized (bucket) {
+            Map<String, String> configurations = bucket.getMetricsConfigurations();
+            if (configurations == null || !configurations.containsKey(id)) {
+                throw noSuchMetricsConfiguration();
+            }
+            Map<String, String> remaining = new java.util.LinkedHashMap<>(configurations);
+            remaining.remove(id);
+            bucket.setMetricsConfigurations(remaining);
+            bucketStore.put(bucketName, bucket);
+        }
+        LOG.debugv("Deleted metrics configuration {0} from bucket: {1}", id, bucketName);
+    }
+
+    private Bucket requireBucket(String bucketName) {
+        return bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
+    }
+
+    private static AwsException noSuchMetricsConfiguration() {
+        return new AwsException("NoSuchConfiguration", "The specified configuration does not exist.", 404);
+    }
+
     // --- Object Lock Configuration ---
 
     public void setBucketObjectLockEnabled(String bucketName) {
