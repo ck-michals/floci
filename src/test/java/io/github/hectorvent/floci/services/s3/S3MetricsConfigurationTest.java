@@ -107,6 +107,31 @@ class S3MetricsConfigurationTest {
     }
 
     @Test
+    void rejectsDuplicateOrMisplacedElements() {
+        // Normalizing these away would store a configuration that is not the one that was sent.
+        String twoIds = "<Id>a</Id><Id>b</Id>";
+        String twoFilters = "<Id>a</Id><Filter><Prefix>x</Prefix></Filter>"
+                + "<Filter><Prefix>y</Prefix></Filter>";
+        String strayElement = "<Id>a</Id><Prefix>logs/</Prefix>";
+        String noId = "<Filter><Prefix>logs/</Prefix></Filter>";
+        String idOnlyInsideFilter = "<Filter><Id>a</Id></Filter>";
+
+        for (String invalid : new String[]{twoIds, twoFilters, strayElement, noId, idOnlyInsideFilter}) {
+            AwsException e = assertThrows(AwsException.class, () -> S3MetricsConfiguration.parse(body(invalid)),
+                    () -> "expected rejection of: " + invalid);
+            assertEquals("MalformedXML", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void acceptsAFilterBeforeItsId() {
+        // Element order is not something to be strict about; the set of elements is.
+        assertEquals("<Id>a</Id><Filter><Prefix>logs/</Prefix></Filter>",
+                S3MetricsConfiguration.parse(
+                        body("<Filter><Prefix>logs/</Prefix></Filter><Id>a</Id>")).innerXml());
+    }
+
+    @Test
     void acceptsAnAndOfExactlyTwoPredicates() {
         // The boundary the rejection is drawn at: two conjuncts are legal, one is not.
         assertEquals("<Id>a</Id><Filter><And><Prefix>logs/</Prefix>"

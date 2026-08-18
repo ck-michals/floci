@@ -826,6 +826,50 @@ class S3ServiceTest {
         assertNull(legacy.getMetricsConfigurations());
     }
 
+    /**
+     * Waits for the thread to reach the bucket monitor. The store is a ConcurrentHashMap, so
+     * nothing else blocks it: this observes the interleaving rather than sleeping long enough to
+     * hope for it, which keeps the test both instant and immune to a slow machine.
+     */
+    private static void awaitBlockedOnMonitor(Thread thread) throws InterruptedException {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+        while (thread.getState() != Thread.State.BLOCKED) {
+            if (System.nanoTime() > deadline) {
+                fail("thread never reached the bucket monitor");
+            }
+            Thread.onSpinWait();
+        }
+    }
+
+    @Test
+    void deleteBucketTakesTheBucketMonitor() throws Exception {
+        // Re-reading the record narrows the window but cannot close it: a delete landing between a
+        // mutation's re-read and its write would still be undone. That interleaving is too narrow
+        // to force from a test, so what is asserted here is the property that closes it — the
+        // delete waits for whoever holds the record's monitor.
+        var buckets = new InMemoryStorage<String, Bucket>();
+        S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir.resolve("s3-monitor"), false);
+        service.createBucket("monitor-bucket", "us-east-1");
+        Bucket record = buckets.get("monitor-bucket").orElseThrow();
+
+        Thread delete = new Thread(() -> service.deleteBucket("monitor-bucket"));
+        synchronized (record) {
+            delete.start();
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+            while (delete.getState() != Thread.State.BLOCKED) {
+                assertTrue(buckets.get("monitor-bucket").isPresent(),
+                        "DeleteBucket removed the record without waiting for the bucket monitor");
+                if (System.nanoTime() > deadline) {
+                    fail("DeleteBucket never reached the bucket monitor");
+                }
+                Thread.onSpinWait();
+            }
+        }
+        delete.join(30_000);
+
+        assertTrue(buckets.get("monitor-bucket").isEmpty());
+    }
+
     @Test
     void aMetricsPutRacingABucketDeleteCannotRestoreTheBucket() throws Exception {
         // A put resolves the bucket record before it writes it back, so a delete landing in between
@@ -851,7 +895,7 @@ class S3ServiceTest {
         synchronized (record) {
             put.start();
             putStarted.await();
-            Thread.sleep(150);
+            awaitBlockedOnMonitor(put);
             service.deleteBucket("race-bucket");
         }
         put.join(30_000);
@@ -860,6 +904,44 @@ class S3ServiceTest {
                 "the deleted bucket was restored by the concurrent metrics put");
         assertEquals("NoSuchBucket",
                 assertInstanceOf(AwsException.class, thrownByPut.get()).getErrorCode());
+    }
+
+    @Test
+    void aMetricsPutCannotOverwriteABucketRecreatedWhileItWaited() throws Exception {
+        // Presence is not enough: deleted and recreated under the same name, the store holds a
+        // different record, and writing the resolved one back would replace the new bucket with
+        // the old one's state.
+        var buckets = new InMemoryStorage<String, Bucket>();
+        S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir.resolve("s3-recreate"), false);
+        service.createBucket("recreated-bucket", "us-east-1");
+        Bucket original = buckets.get("recreated-bucket").orElseThrow();
+
+        var putStarted = new java.util.concurrent.CountDownLatch(1);
+        var thrownByPut = new java.util.concurrent.atomic.AtomicReference<Exception>();
+        Thread put = new Thread(() -> {
+            putStarted.countDown();
+            try {
+                service.putBucketMetricsConfiguration("recreated-bucket", "stale", "<Id>stale</Id>");
+            } catch (Exception e) {
+                thrownByPut.set(e);
+            }
+        });
+
+        synchronized (original) {
+            put.start();
+            putStarted.await();
+            awaitBlockedOnMonitor(put);
+            service.deleteBucket("recreated-bucket");
+            service.createBucket("recreated-bucket", "us-east-1");
+        }
+        put.join(30_000);
+
+        assertEquals("NoSuchBucket",
+                assertInstanceOf(AwsException.class, thrownByPut.get()).getErrorCode());
+        assertNotSame(original, buckets.get("recreated-bucket").orElseThrow(),
+                "the recreated bucket was replaced by the record the put had resolved");
+        assertNull(buckets.get("recreated-bucket").orElseThrow().getMetricsConfigurations(),
+                "the recreated bucket inherited a configuration written against the old record");
     }
 
     @Test

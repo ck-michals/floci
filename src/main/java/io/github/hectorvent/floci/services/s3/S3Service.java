@@ -1660,7 +1660,7 @@ public class S3Service implements Resettable {
         // bucket-scoped mutations: without it two concurrent puts of different ids both start from
         // the same map and one of the configurations is lost.
         synchronized (bucket) {
-            requireStillPresent(bucketName);
+            requireSameRecord(bucketName, bucket);
             Map<String, String> configurations = bucket.getMetricsConfigurations() != null
                     ? new java.util.LinkedHashMap<>(bucket.getMetricsConfigurations())
                     : new java.util.LinkedHashMap<>();
@@ -1711,7 +1711,7 @@ public class S3Service implements Resettable {
         // Same monitor as the put: the existence check and the write have to be one step, or a
         // concurrent put of another id is dropped by the write that follows it.
         synchronized (bucket) {
-            requireStillPresent(bucketName);
+            requireSameRecord(bucketName, bucket);
             Map<String, String> configurations = bucket.getMetricsConfigurations();
             if (configurations == null || !configurations.containsKey(id)) {
                 throw noSuchMetricsConfiguration();
@@ -1731,11 +1731,13 @@ public class S3Service implements Resettable {
     }
 
     /**
-     * Re-reads the bucket under its monitor. A caller that resolved the record before a concurrent
-     * DeleteBucket must not write it back afterwards, which would restore the deleted bucket.
+     * Re-reads the bucket under its monitor and checks it is still the same record. Presence alone
+     * is not enough: a bucket deleted and recreated under the same name leaves a different record
+     * in the store, and writing the resolved one back would replace the new bucket with the old
+     * one's state.
      */
-    private void requireStillPresent(String bucketName) {
-        if (bucketStore.get(bucketName).isEmpty()) {
+    private void requireSameRecord(String bucketName, Bucket resolved) {
+        if (bucketStore.get(bucketName).orElse(null) != resolved) {
             throw new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404);
         }
     }

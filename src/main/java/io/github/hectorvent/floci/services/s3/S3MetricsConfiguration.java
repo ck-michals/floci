@@ -31,13 +31,23 @@ record S3MetricsConfiguration(String id, String innerXml) {
             throw malformed();
         }
 
+        // The configuration is one Id and at most one Filter, so anything else under the root —
+        // a stray element, a second Id, a second Filter — is a body AWS would not have accepted.
+        List<String> children = XmlParser.childElementNames(xml, ROOT);
+        long ids = children.stream().filter("Id"::equals).count();
+        long filters = children.stream().filter("Filter"::equals).count();
+        if (ids != 1 || filters > 1 || children.size() != ids + filters) {
+            throw malformed();
+        }
+        boolean hasFilter = filters == 1;
+
         String id = XmlParser.extractFirst(xml, "Id", null);
         if (id == null || id.isBlank()) {
             throw malformed();
         }
 
         XmlBuilder inner = new XmlBuilder().elem("Id", id);
-        if (XmlParser.childElementNames(xml, ROOT).contains("Filter")) {
+        if (hasFilter) {
             inner.start("Filter").raw(filterXml(xml)).end("Filter");
         }
         return new S3MetricsConfiguration(id, inner.build());
