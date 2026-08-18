@@ -64,6 +64,8 @@ public class RdsService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
+    /** Value AWS reports as the OwningService of a secret RDS manages. */
+    private static final String MANAGED_SECRET_OWNING_SERVICE = "rds";
     private static final List<ManagedClusterParameterGroup> MANAGED_CLUSTER_PARAMETER_GROUPS = List.of(
             managedDefault("aurora-mysql5.7"),
             managedDefault("aurora-mysql8.0"),
@@ -739,13 +741,19 @@ public class RdsService implements Resettable {
                     "ManageMasterUserPassword requires Secrets Manager support.", 400);
         }
         String secretName = "rds!" + instance.getDbiResourceId();
+        // RDS owns the secret it manages: it rotates the master password itself, so the secret
+        // carries no rotation Lambda. AWS marks that with OwningService and these two tags.
+        List<Secret.Tag> tags = List.of(
+                new Secret.Tag("aws:rds:primaryDBInstanceArn", instance.getDbInstanceArn()),
+                new Secret.Tag("aws:secretsmanager:owningService", MANAGED_SECRET_OWNING_SERVICE));
         Secret secret = secretsManagerService.createSecret(
                 secretName,
                 managedMasterSecretString(instance),
                 null,
                 "Managed RDS master user secret for " + instance.getDbInstanceIdentifier(),
                 kmsKeyId,
-                null,
+                tags,
+                MANAGED_SECRET_OWNING_SERVICE,
                 region);
         instance.setMasterUserSecretArn(secret.getArn());
         instance.setMasterUserSecretStatus("active");

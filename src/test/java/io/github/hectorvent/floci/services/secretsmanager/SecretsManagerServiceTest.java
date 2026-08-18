@@ -327,6 +327,67 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void rotateSecretWithoutLambdaArnThrows() {
+        service.createSecret("my-secret", "value", null, null, null, null, REGION);
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.rotateSecret("my-secret", null, null,
+                        new Secret.RotationRules(30, null, null), true, REGION));
+
+        assertEquals("InvalidRequestException", e.getErrorCode());
+    }
+
+    @Test
+    void rotateServiceManagedSecretNeedsNoLambdaArn() {
+        io.github.hectorvent.floci.services.lambda.LambdaService mockLambda =
+                org.mockito.Mockito.mock(io.github.hectorvent.floci.services.lambda.LambdaService.class);
+        SecretsManagerService svc = new SecretsManagerService(
+                new InMemoryStorage<String, Secret>(), 30,
+                new io.github.hectorvent.floci.core.common.RegionResolver("us-east-1", "000000000000"),
+                mockLambda, new com.fasterxml.jackson.databind.ObjectMapper());
+
+        // The secret RDS manages: rotated by RDS itself, so it carries no rotation Lambda.
+        svc.createSecret("rds!db-1234", "value", null, null, null, null, "rds", REGION);
+
+        Secret rotated = svc.rotateSecret("rds!db-1234", null, null,
+                new Secret.RotationRules(7, null, null), true, REGION);
+
+        assertTrue(rotated.isRotationEnabled());
+        assertEquals(7, rotated.getRotationRules().automaticallyAfterDays());
+        assertNotNull(rotated.getLastRotatedDate());
+        assertNull(rotated.getRotationLambdaArn());
+        // No Lambda exists to drive the rotation lifecycle, so none may be invoked.
+        org.mockito.Mockito.verifyNoInteractions(mockLambda);
+    }
+
+    @Test
+    void rotateServiceManagedSecretRejectsLambdaArn() {
+        service.createSecret("rds!db-1234", "value", null, null, null, null, "rds", REGION);
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.rotateSecret("rds!db-1234", null,
+                        "arn:aws:lambda:us-east-1:000000000000:function:rotate",
+                        new Secret.RotationRules(7, null, null), true, REGION));
+
+        assertEquals("InvalidRequestException", e.getErrorCode());
+        assertEquals("Rotation Lambda ARN is not supported for a service-managed secret.", e.getMessage());
+    }
+
+    @Test
+    void ordinarySecretNamedLikeAnRdsSecretStillNeedsALambdaArn() {
+        // Ownership is a property of the secret, not of its name: anyone may create a secret
+        // called rds!something, and that must not grant it service-managed rotation.
+        service.createSecret("rds!db-impostor", "value", null, null, null, null, REGION);
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.rotateSecret("rds!db-impostor", null, null,
+                        new Secret.RotationRules(7, null, null), true, REGION));
+
+        assertEquals("InvalidRequestException", e.getErrorCode());
+        assertTrue(e.getMessage().contains("doesn't already have a Lambda function ARN configured"));
+    }
+
+    @Test
     void tagAndUntagResource() {
         service.createSecret("my-secret", "value", null, null, null,
                 List.of(new Secret.Tag("env", "prod")), REGION);

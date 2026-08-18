@@ -276,7 +276,7 @@ class RdsServiceTest {
         SecretsManagerService secretsManager = mock(SecretsManagerService.class);
         Secret secret = new Secret();
         secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-secret");
-        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("kms-key-1"), eq(null), eq("us-east-1")))
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("kms-key-1"), any(), eq("rds"), eq("us-east-1")))
                 .thenReturn(secret);
         RdsService service = newService(containerManager, proxyManager,
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -295,11 +295,20 @@ class RdsServiceTest {
 
         ArgumentCaptor<String> secretName = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> secretString = ArgumentCaptor.forClass(String.class);
-        verify(secretsManager).createSecret(secretName.capture(), secretString.capture(), eq(null), any(), eq("kms-key-1"), eq(null), eq("us-east-1"));
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Secret.Tag>> secretTags = ArgumentCaptor.forClass(List.class);
+        verify(secretsManager).createSecret(secretName.capture(), secretString.capture(), eq(null), any(),
+                eq("kms-key-1"), secretTags.capture(), eq("rds"), eq("us-east-1"));
         assertTrue(secretName.getValue().startsWith("rds!db-"));
         assertTrue(secretString.getValue().contains("\"username\":\"admin\""));
         assertTrue(secretString.getValue().contains("\"password\":\"" + instance.getMasterPassword() + "\""));
         assertTrue(secretString.getValue().contains("\"dbInstanceIdentifier\":\"mydb\""));
+
+        // AWS marks the secret it manages with both of these tags, alongside OwningService.
+        assertTrue(secretTags.getValue().contains(
+                new Secret.Tag("aws:secretsmanager:owningService", "rds")));
+        assertTrue(secretTags.getValue().contains(
+                new Secret.Tag("aws:rds:primaryDBInstanceArn", instance.getDbInstanceArn())));
     }
 
     @Test

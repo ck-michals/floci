@@ -82,6 +82,17 @@ public class SecretsManagerService {
 
     public Secret createSecret(String name, String secretString, String secretBinary,
                                String description, String kmsKeyId, List<Secret.Tag> tags, String region) {
+        return createSecret(name, secretString, secretBinary, description, kmsKeyId, tags, null, region);
+    }
+
+    /**
+     * Creates a secret, optionally owned by an AWS service such as {@code rds}. A service-owned
+     * secret is rotated by that service rather than by a rotation Lambda, so callers cannot supply
+     * one for it. Only other floci services set {@code owningService}; the wire API cannot.
+     */
+    public Secret createSecret(String name, String secretString, String secretBinary,
+                               String description, String kmsKeyId, List<Secret.Tag> tags,
+                               String owningService, String region) {
         String storageKey = regionKey(region, name);
         Secret existing = store.get(storageKey).orElse(null);
 
@@ -115,6 +126,7 @@ public class SecretsManagerService {
         secret.setTags(tags != null ? new ArrayList<>(tags) : new ArrayList<>());
         secret.setVersions(versions);
         secret.setCurrentVersionId(versionId);
+        secret.setOwningService(owningService);
 
         store.put(storageKey, secret);
         LOG.infov("Created secret: {0} in region {1}", name, region);
@@ -466,8 +478,8 @@ public class SecretsManagerService {
             // IS the region it lives in — comparing the request region is equivalent to a
             // per-secret attribute here (all match when the prefix fits, none otherwise).
             case "primary-region" -> region != null && region.startsWith(targetVal);
-            // owning-service is a valid Filter.Key enum value but is currently deferred (always returning false)
-            case "owning-service" -> false;
+            case "owning-service" -> secret.getOwningService() != null
+                    && secret.getOwningService().startsWith(targetVal);
             case "all" -> {
                 String lowerVal = targetVal.toLowerCase();
                 boolean nameMatch = secret.getName() != null && secret.getName().toLowerCase().startsWith(lowerVal);
@@ -534,14 +546,22 @@ public class SecretsManagerService {
                     "RotationRules can't include both AutomaticallyAfterDays and ScheduleExpression.", 400);
         }
 
+        // A service-managed secret is rotated by its owning service, so it has no rotation Lambda:
+        // AWS rejects one here, and does not require one to enable rotation.
+        boolean serviceManaged = secret.getOwningService() != null;
+        if (serviceManaged && rotationLambdaArn != null) {
+            throw new AwsException("InvalidRequestException",
+                    "Rotation Lambda ARN is not supported for a service-managed secret.", 400);
+        }
+
         String finalLambdaArn = rotationLambdaArn != null ? rotationLambdaArn : secret.getRotationLambdaArn();
-        if (finalLambdaArn == null) {
+        if (!serviceManaged && finalLambdaArn == null) {
             throw new AwsException("InvalidRequestException",
                     "You tried to enable rotation on a secret that doesn't already have a Lambda function ARN configured and you didn't include such an ARN as a parameter in this call.", 400);
         }
 
         // Validate Lambda exists synchronously
-        if (lambdaService != null) {
+        if (!serviceManaged && lambdaService != null) {
             try {
                 lambdaService.getFunction(region, finalLambdaArn);
             } catch (AwsException e) {
@@ -570,9 +590,20 @@ public class SecretsManagerService {
                 secret.setRotationRules(rotationRules);
             }
             secret.setRotationEnabled(true);
-            secret.setLastChangedDate(Instant.now());
+            Instant now = Instant.now();
+            secret.setLastChangedDate(now);
+            // The owning service rotates in place, so record it as done rather than staging a
+            // pending version for a Lambda that will never run.
+            if (serviceManaged && rotateImmediately) {
+                secret.setLastRotatedDate(now);
+            }
 
             store.put(regionKey(region, secret.getName()), secret);
+        }
+
+        if (serviceManaged) {
+            LOG.infov("Enabled service-managed rotation for secret: {0}", secret.getName());
+            return secret;
         }
 
         String arn = secret.getArn();

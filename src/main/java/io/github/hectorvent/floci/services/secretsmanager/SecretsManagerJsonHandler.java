@@ -302,6 +302,9 @@ public class SecretsManagerJsonHandler {
         if (secret.getDeletedDate() != null) {
             response.put("DeletedDate", secret.getDeletedDate().toEpochMilli() / 1000.0);
         }
+        if (secret.getOwningService() != null) {
+            response.put("OwningService", secret.getOwningService());
+        }
 
         ArrayNode tagsArray = objectMapper.createArrayNode();
         if (secret.getTags() != null) {
@@ -402,6 +405,9 @@ public class SecretsManagerJsonHandler {
             }
             if (secret.getLastAccessedDate() != null) {
                 node.put("LastAccessedDate", secret.getLastAccessedDate().toEpochMilli() / 1000.0);
+            }
+            if (secret.getOwningService() != null) {
+                node.put("OwningService", secret.getOwningService());
             }
             ArrayNode tagsArray = objectMapper.createArrayNode();
             if (secret.getTags() != null) {
