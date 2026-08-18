@@ -336,6 +336,27 @@ class RdsServiceTest {
     }
 
     @Test
+    void backfillDoesNotStopStartupWhenASecretCannotBeMarked() {
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-secret");
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        doThrow(new IllegalStateException("storage unavailable"))
+                .when(secretsManager).markOwnedByService(any(), any());
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        service.createDbInstance("mydb", "postgres", "13",
+                "admin", null, "dbname", "db.t3.micro",
+                20, true, null, null, null, true, null);
+
+        assertDoesNotThrow(() -> service.backfillManagedSecretOwnership(null));
+    }
+
+    @Test
     void backfillIgnoresInstancesWithoutAManagedSecret() {
         SecretsManagerService secretsManager = mock(SecretsManagerService.class);
         RdsService service = newService(containerManager, proxyManager,

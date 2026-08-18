@@ -747,18 +747,23 @@ public class RdsService implements Resettable {
         if (secretsManagerService == null) {
             return;
         }
-        for (DbInstance instance : allInstances()) {
-            String secretArn = instance.getMasterUserSecretArn();
-            if (secretArn == null) {
-                continue;
+        // Reading persisted state must not be able to stop the emulator from starting.
+        try {
+            for (DbInstance instance : allInstances()) {
+                String secretArn = instance.getMasterUserSecretArn();
+                if (secretArn == null) {
+                    continue;
+                }
+                try {
+                    // The secret's ARN names its own account and region, neither of which a
+                    // startup backfill has a request context to infer.
+                    secretsManagerService.markOwnedByService(secretArn, MANAGED_SECRET_OWNING_SERVICE);
+                } catch (RuntimeException e) {
+                    LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
+                }
             }
-            try {
-                // The secret's ARN names its own account and region, neither of which a startup
-                // backfill has a request context to infer.
-                secretsManagerService.markOwnedByService(secretArn, MANAGED_SECRET_OWNING_SERVICE);
-            } catch (RuntimeException e) {
-                LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
-            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Skipped the master user secret ownership backfill");
         }
     }
 
