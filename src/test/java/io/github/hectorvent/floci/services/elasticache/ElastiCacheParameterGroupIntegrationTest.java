@@ -178,6 +178,22 @@ class ElastiCacheParameterGroupIntegrationTest {
             .statusCode(400)
             .body(containsString("does not have 7 components"));
 
+        // An ARN in another service's namespace names another resource, however familiar the
+        // trailing name looks.
+        query("ListTagsForResource")
+                .formParam("ResourceName", "arn:aws:rds:us-east-1:000000000000:parametergroup:" + GROUP)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("service field is wrong"));
+
+        query("ListTagsForResource")
+                .formParam("ResourceName", "arn:aws-cn:elasticache:us-east-1:000000000000:parametergroup:" + GROUP)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("partition field is wrong"));
+
         query("ListTagsForResource")
                 .formParam("ResourceName", "arn:aws:elasticache:us-east-1:000000000000:parametergroup:no-such-pg")
         .when().post("/")

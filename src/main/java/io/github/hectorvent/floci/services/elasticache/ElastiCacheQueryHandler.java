@@ -376,8 +376,16 @@ public class ElastiCacheQueryHandler {
             if (arn.length != 7 || !"arn".equals(arn[0])) {
                 throw new AwsException("InvalidARN", "Input ARN string does not have 7 components.", 400);
             }
-            // The ARN names the resource, so its region and account decide what is being asked
-            // about — reading the trailing name alone would answer for a different resource.
+            // Every component names part of the resource, so each is checked before the name is
+            // used: a partition, service, region or account that is not this one asks about a
+            // different resource, and answering from the trailing name would describe the wrong.
+            if (!"aws".equals(arn[1])) {
+                throw new AwsException("InvalidARN", "partition field is wrong. Expected value is aws", 400);
+            }
+            if (!"elasticache".equals(arn[2])) {
+                throw new AwsException("InvalidARN",
+                        "service field is wrong. Expected value is elasticache", 400);
+            }
             if (!regionResolver.getRegion().equals(arn[3])) {
                 throw new AwsException("InvalidParameterValue",
                         "Unauthorized call. Please check the region or customer id", 400);
