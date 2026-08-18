@@ -330,9 +330,34 @@ class RdsServiceTest {
 
         // An instance persisted by a floci that predates ownership tracking still names its
         // secret, which is what makes that secret managed — the name never is.
-        service.backfillManagedSecretOwnership(null);
+        service.backfillManagedSecretOwnership();
 
         verify(secretsManager).markOwnedByService(secretArn, "rds");
+    }
+
+    @Test
+    void restorePersistedRuntimeRunsTheOwnershipBackfill() {
+        // The lifecycle calls restorePersistedRuntime() after storageFactory.loadAll(), so the
+        // backfill hangs off that rather than off its own StartupEvent observer, which would have
+        // no ordering against the reload.
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret restored = new Secret();
+        String restoredArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-secret";
+        restored.setArn(restoredArn);
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(restored);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        service.createDbInstance("mydb", "postgres", "13",
+                "admin", null, "dbname", "db.t3.micro",
+                20, true, null, null, null, true, null);
+
+        service.restorePersistedRuntime();
+
+        verify(secretsManager).markOwnedByService(restoredArn, "rds");
     }
 
     @Test
@@ -353,7 +378,7 @@ class RdsServiceTest {
                 "admin", null, "dbname", "db.t3.micro",
                 20, true, null, null, null, true, null);
 
-        assertDoesNotThrow(() -> service.backfillManagedSecretOwnership(null));
+        assertDoesNotThrow(() -> service.backfillManagedSecretOwnership());
     }
 
     @Test
@@ -368,7 +393,7 @@ class RdsServiceTest {
                 "admin", "password", "dbname", "db.t3.micro",
                 20, false, null, null, null);
 
-        service.backfillManagedSecretOwnership(null);
+        service.backfillManagedSecretOwnership();
 
         verify(secretsManager, never()).markOwnedByService(any(), any());
     }

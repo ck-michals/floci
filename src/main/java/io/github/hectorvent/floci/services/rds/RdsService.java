@@ -36,9 +36,7 @@ import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.core.common.Resettable;
-import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -320,6 +318,7 @@ public class RdsService implements Resettable {
         restoreClusters();
         restoreInstances();
         restoreProxies();
+        backfillManagedSecretOwnership();
     }
 
     public void clear() {
@@ -742,8 +741,13 @@ public class RdsService implements Resettable {
      * before floci tracked ownership refers to a secret that would otherwise read as an ordinary
      * one, and so would refuse the Lambda-free rotation these secrets are rotated with. RDS state
      * is what makes the secret managed, so the instance is what this reads — never the name.
+     *
+     * <p>Runs from {@link #restorePersistedRuntime()} rather than from its own {@code StartupEvent}
+     * observer: the lifecycle calls that after {@code storageFactory.loadAll()}, whereas two
+     * observers of the same event have no ordering between them, and a reload would discard these
+     * writes before they were flushed.
      */
-    void backfillManagedSecretOwnership(@Observes StartupEvent event) {
+    void backfillManagedSecretOwnership() {
         if (secretsManagerService == null) {
             return;
         }
