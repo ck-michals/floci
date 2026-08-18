@@ -1248,8 +1248,10 @@ public class ApiGatewayController {
                                      @PathParam("domainName") String domainName,
                                      @PathParam("apiMappingId") String apiMappingId) {
         String region = regionResolver.resolveRegion(headers);
+        // Deleted by the path the selected record is stored under, so the record that answered the
+        // lookup is the record that goes.
         BasePathMapping mapping = findApiMapping(region, domainName, apiMappingId);
-        service.deleteBasePathMapping(region, domainName, mapping.getBasePath());
+        service.deleteBasePathMappingRecord(region, domainName, mapping.getBasePath());
         return Response.noContent().build();
     }
 

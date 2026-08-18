@@ -1059,6 +1059,20 @@ public class ApiGatewayService {
         basePathMappingStore.delete(mappingKey(region, domainName, path));
     }
 
+    /**
+     * Deletes the record stored under exactly this base path, for a caller that already holds the
+     * record rather than a key to look one up by. Normalising here would delete the canonical root
+     * instead — state written before writes were canonicalised can hold a record under "/" or "",
+     * and that is the record such a caller selected.
+     */
+    public void deleteBasePathMappingRecord(String region, String domainName, String storedBasePath) {
+        String key = mappingKey(region, domainName, storedBasePath == null ? "" : storedBasePath);
+        if (basePathMappingStore.get(key).isEmpty()) {
+            throw new AwsException("NotFoundException", "Base path mapping not found", 404);
+        }
+        basePathMappingStore.delete(key);
+    }
+
     // ──────────────────────────── Custom Domain Resolution ────────────────────────────
 
     /**
