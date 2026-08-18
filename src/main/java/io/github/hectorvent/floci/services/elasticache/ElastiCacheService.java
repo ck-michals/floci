@@ -411,11 +411,20 @@ public class ElastiCacheService {
         return List.of(requireParameterGroup(name));
     }
 
-    public CacheParameterGroup requireParameterGroup(String name) {
+    private static boolean isDefaultParameterGroup(String name) {
+        return defaultParameterGroups().stream().anyMatch(group -> group.getName().equals(name));
+    }
+
+    /** The group by that name, whether stored or one of the published defaults. */
+    public java.util.Optional<CacheParameterGroup> findParameterGroup(String name) {
         return parameterGroups.get(name)
                 .or(() -> defaultParameterGroups().stream()
                         .filter(group -> group.getName().equals(name))
-                        .findFirst())
+                        .findFirst());
+    }
+
+    public CacheParameterGroup requireParameterGroup(String name) {
+        return findParameterGroup(name)
                 .orElseThrow(() -> new AwsException("CacheParameterGroupNotFound",
                         "CacheParameterGroup " + name + " not found.", 404));
     }
@@ -426,13 +435,20 @@ public class ElastiCacheService {
      * missing from a partial catalogue would refuse configurations AWS accepts.
      */
     public void modifyCacheParameterGroup(String name, Map<String, String> parameters) {
-        requireParameterGroup(name);
         synchronized (lockFor(name)) {
             // Read inside the lock: a record resolved before it could have been deleted since, and
             // writing it back would restore the group the delete removed.
-            CacheParameterGroup group = parameterGroups.get(name)
-                    .orElseThrow(() -> new AwsException("InvalidParameterValue",
-                            "The parameter group " + name + " is a default group and cannot be modified.", 400));
+            CacheParameterGroup group = parameterGroups.get(name).orElse(null);
+            if (group == null) {
+                // Absent from the store means one of two different things, and they do not share
+                // an error: a published default was never stored, whereas anything else is gone.
+                if (isDefaultParameterGroup(name)) {
+                    throw new AwsException("InvalidParameterValue",
+                            "The parameter group " + name + " is a default group and cannot be modified.", 400);
+                }
+                throw new AwsException("CacheParameterGroupNotFound",
+                        "CacheParameterGroup " + name + " not found.", 404);
+            }
             Map<String, String> updated = new LinkedHashMap<>(group.getParameters());
             updated.putAll(parameters);
             group.setParameters(updated);

@@ -153,6 +153,40 @@ class ElastiCacheParameterGroupIntegrationTest {
     }
 
     @Test
+    @Order(3)
+    void tagsAreAnsweredForTheArnThatWasAskedAbout() {
+        // Reading the trailing name alone would answer with this caller's group for an ARN naming
+        // another account or region. Each rejection is the one AWS gives.
+        query("ListTagsForResource")
+                .formParam("ResourceName", "arn:aws:elasticache:eu-west-1:000000000000:parametergroup:" + GROUP)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("Please check the region"));
+
+        query("ListTagsForResource")
+                .formParam("ResourceName", "arn:aws:elasticache:us-east-1:111122223333:parametergroup:" + GROUP)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("does not belong to the caller"));
+
+        query("ListTagsForResource")
+                .formParam("ResourceName", "not-an-arn")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("does not have 7 components"));
+
+        query("ListTagsForResource")
+                .formParam("ResourceName", "arn:aws:elasticache:us-east-1:000000000000:parametergroup:no-such-pg")
+        .when().post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("no-such-pg is not present"));
+    }
+
+    @Test
     @Order(4)
     void theDefaultGroupsArePublished() {
         query("DescribeCacheParameterGroups")

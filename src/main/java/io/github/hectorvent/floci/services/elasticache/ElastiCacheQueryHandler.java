@@ -372,10 +372,27 @@ public class ElastiCacheQueryHandler {
     private Response handleListTagsForResource(MultivaluedMap<String, String> params) {
         try {
             String resourceName = params.getFirst("ResourceName");
+            String[] arn = resourceName == null ? new String[0] : resourceName.split(":", -1);
+            if (arn.length != 7 || !"arn".equals(arn[0])) {
+                throw new AwsException("InvalidARN", "Input ARN string does not have 7 components.", 400);
+            }
+            // The ARN names the resource, so its region and account decide what is being asked
+            // about — reading the trailing name alone would answer for a different resource.
+            if (!regionResolver.getRegion().equals(arn[3])) {
+                throw new AwsException("InvalidParameterValue",
+                        "Unauthorized call. Please check the region or customer id", 400);
+            }
+            if (!regionResolver.getAccountId().equals(arn[4])) {
+                throw new AwsException("InvalidParameterValue",
+                        "The resource ARN does not belong to the caller's account.", 400);
+            }
+
             Map<String, String> tags = Map.of();
-            if (resourceName != null && resourceName.contains(":parametergroup:")) {
-                String name = resourceName.substring(resourceName.lastIndexOf(':') + 1);
-                tags = service.requireParameterGroup(name).getTags();
+            if ("parametergroup".equals(arn[5])) {
+                tags = service.findParameterGroup(arn[6])
+                        .orElseThrow(() -> new AwsException("CacheParameterGroupNotFound",
+                                arn[6] + " is not present", 404))
+                        .getTags();
             }
             var xml = new XmlBuilder().start("TagList");
             tags.forEach((key, value) -> xml.start("Tag")

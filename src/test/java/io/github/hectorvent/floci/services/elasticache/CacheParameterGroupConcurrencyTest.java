@@ -83,8 +83,12 @@ class CacheParameterGroupConcurrencyTest {
                     start.await();
                     try {
                         service.modifyCacheParameterGroup(name, Map.of("maxmemory-policy", "allkeys-lru"));
-                    } catch (AwsException expectedWhenDeleteWon) {
-                        // The delete got there first, which is a legitimate outcome.
+                    } catch (AwsException e) {
+                        // Losing the race is a legitimate outcome, but only with this error: any
+                        // other one would be a real failure hiding inside the tolerated case.
+                        assertEquals("CacheParameterGroupNotFound", e.getErrorCode(),
+                                "modify losing the race to delete reported " + e.getErrorCode()
+                                        + ": " + e.getMessage());
                     }
                     return null;
                 });
@@ -106,6 +110,24 @@ class CacheParameterGroupConcurrencyTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void modifyReportsWhichThingIsActuallyWrong() {
+        // Absent from the store covers two different situations, and the race test only sees the
+        // second one when it happens to lose the race, so both are asserted directly here.
+        service.createCacheParameterGroup("gone-pg", "redis7", "deleted below", Map.of());
+        service.deleteCacheParameterGroup("gone-pg");
+
+        AwsException deleted = assertThrows(AwsException.class,
+                () -> service.modifyCacheParameterGroup("gone-pg", Map.of("maxmemory-policy", "noeviction")));
+        assertEquals("CacheParameterGroupNotFound", deleted.getErrorCode(),
+                "a group that was deleted must not be reported as a default group");
+
+        AwsException published = assertThrows(AwsException.class,
+                () -> service.modifyCacheParameterGroup("default.redis7", Map.of("maxmemory-policy", "noeviction")));
+        assertEquals("InvalidParameterValue", published.getErrorCode());
+        assertTrue(published.getMessage().contains("default group"));
     }
 
     @Test
