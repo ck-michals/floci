@@ -45,7 +45,7 @@ class BuildV2ProxyEventTrailingSlashTest {
         controller = new ApiGatewayExecuteController(
                 null, null, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null
         );
     }
 
