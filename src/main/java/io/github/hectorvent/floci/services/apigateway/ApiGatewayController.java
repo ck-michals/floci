@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.HexFormat;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -956,7 +958,7 @@ public class ApiGatewayController {
     @Path("/v2/apis/{apiId}")
     public Response deleteApi(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
         String region = regionResolver.resolveRegion(headers);
-        service.requireNoApiMappings(region, apiId);
+        service.requireNoApiMappings(apiId);
         v2Service.deleteApi(region, apiId);
         return Response.noContent().build();
     }
@@ -1144,13 +1146,15 @@ public class ApiGatewayController {
     public Response createV2DomainName(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         Map<String, Object> request = readJsonBody(body);
-        // HTTP APIs require exactly one configuration, where the REST API takes none at all.
+        // HTTP APIs require exactly one configuration, where the REST API takes none at all. It has
+        // to be an object: a scalar or a list there is still a body AWS would not have accepted.
         if (!(request.get("domainNameConfigurations") instanceof List<?> configurations)
-                || configurations.size() != 1) {
+                || configurations.size() != 1
+                || !(configurations.getFirst() instanceof Map<?, ?> configuration)) {
             throw new AwsException("BadRequestException",
                     "Invalid input. Expected one domain name configuration", 400);
         }
-        rejectUnemulatedDomainInputs(request, (Map<?, ?>) configurations.getFirst());
+        rejectUnemulatedDomainInputs(request, configuration);
         CustomDomain domain = service.createDomainName(region, toV1DomainRequest(request));
         return Response.status(201).entity(toV2DomainNode(region, domain).toString())
                 .type(MediaType.APPLICATION_JSON).build();
@@ -1194,12 +1198,25 @@ public class ApiGatewayController {
         if (request.get("apiId") == null || request.get("stage") == null) {
             throw new AwsException("BadRequestException", "apiId and stage are required", 400);
         }
-        Map<String, Object> v1Request = new HashMap<>();
-        v1Request.put("restApiId", request.get("apiId"));
-        v1Request.put("stage", request.get("stage"));
-        if (request.get("apiMappingKey") != null) {
-            v1Request.put("basePath", request.get("apiMappingKey"));
+        String apiId = String.valueOf(request.get("apiId"));
+        String stage = String.valueOf(request.get("stage"));
+        // A mapping to an API or stage that does not exist would route nowhere, so AWS refuses it
+        // rather than answering 201 with something unusable.
+        requireApiAndStageExist(region, apiId, stage);
+
+        String basePath = canonicalBasePath(
+                request.get("apiMappingKey") == null ? null : String.valueOf(request.get("apiMappingKey")));
+        boolean keyTaken = service.getBasePathMappings(region, domainName).stream()
+                .anyMatch(existing -> canonicalBasePath(existing.getBasePath()).equals(basePath));
+        if (keyTaken) {
+            throw new AwsException("ConflictException",
+                    "ApiMapping key already exists for this domain name", 409);
         }
+
+        Map<String, Object> v1Request = new HashMap<>();
+        v1Request.put("restApiId", apiId);
+        v1Request.put("stage", stage);
+        v1Request.put("basePath", basePath);
         BasePathMapping mapping = service.createBasePathMapping(region, domainName, v1Request);
         return Response.status(201).entity(toApiMappingNode(mapping).toString())
                 .type(MediaType.APPLICATION_JSON).build();
@@ -1926,13 +1943,37 @@ public class ApiGatewayController {
         return node;
     }
 
+    /** Rejects a mapping whose API or stage does not exist, with the errors AWS gives for each. */
+    private void requireApiAndStageExist(String region, String apiId, String stage) {
+        try {
+            v2Service.getApi(region, apiId);
+        } catch (AwsException e) {
+            throw new AwsException("BadRequestException", "Invalid API identifier specified: " + apiId, 400);
+        }
+        try {
+            v2Service.getStage(region, apiId, stage);
+        } catch (AwsException e) {
+            throw new AwsException("BadRequestException", "Invalid stage identifier specified", 400);
+        }
+    }
+
     /**
      * Derives the mapping id from what identifies the mapping, so it survives a restart and is the
-     * same id whether the mapping was created through the v1 or the v2 endpoint.
+     * same id whichever API created it. The base path is encoded rather than hashed: two base paths
+     * sharing a hash would share an id, and a read or delete by that id would pick between them.
      */
     private static String apiMappingId(BasePathMapping mapping) {
-        String basePath = mapping.getBasePath() == null ? "(none)" : mapping.getBasePath();
-        return Integer.toHexString(basePath.hashCode()).replace("-", "0");
+        return HexFormat.of().formatHex(
+                canonicalBasePath(mapping.getBasePath()).getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * The shared store keeps the root mapping under {@code (none)}, which v2 expresses as an empty
+     * key. Both spellings have to land on the one record: AWS treats an omitted key and an empty
+     * key as the same mapping and refuses the second as a duplicate.
+     */
+    private static String canonicalBasePath(String basePath) {
+        return basePath == null || basePath.isBlank() || "/".equals(basePath) ? "(none)" : basePath;
     }
 
     private BasePathMapping findApiMapping(String region, String domainName, String apiMappingId) {

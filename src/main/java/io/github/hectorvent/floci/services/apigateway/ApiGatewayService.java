@@ -1020,8 +1020,10 @@ public class ApiGatewayService {
      * Refuses to let an API go while a custom domain still maps to it, which is what AWS answers:
      * the mapping would otherwise be left pointing at an API that no longer exists.
      */
-    public void requireNoApiMappings(String region, String apiId) {
-        boolean mapped = basePathMappingStore.scan(k -> k.startsWith(region + "::")).stream()
+    public void requireNoApiMappings(String apiId) {
+        // Every region is scanned, not just the caller's: a mapping is keyed under the region of
+        // the domain it belongs to, which need not be the region the API is being deleted in.
+        boolean mapped = basePathMappingStore.scan(key -> true).stream()
                 .anyMatch(mapping -> apiId.equals(mapping.getRestApiId()));
         if (mapped) {
             throw new AwsException("BadRequestException", "Deleting API " + apiId

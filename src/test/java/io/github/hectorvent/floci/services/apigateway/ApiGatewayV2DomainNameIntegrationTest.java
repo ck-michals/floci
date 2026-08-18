@@ -176,6 +176,15 @@ class ApiGatewayV2DomainNameIntegrationTest {
                 .statusCode(201)
                 .extract().path("apiId");
 
+        // A mapping needs a stage that exists, so the API gets one before it is mapped.
+        given()
+            .contentType(ContentType.JSON)
+            .body("{\"stageName\":\"$default\"}")
+        .when()
+            .post("/v2/apis/" + apiId + "/stages")
+        .then()
+            .statusCode(201);
+
         apiMappingId = given()
                 .contentType(ContentType.JSON)
                 .body("{\"apiId\":\"%s\",\"stage\":\"$default\",\"apiMappingKey\":\"orders\"}".formatted(apiId))
@@ -192,6 +201,97 @@ class ApiGatewayV2DomainNameIntegrationTest {
 
     @Test
     @Order(7)
+    void aMappingNeedsAnApiAndStageThatExist() {
+        // Verified against AWS: both are BadRequestException rather than a 201 for a mapping that
+        // routes nowhere.
+        given()
+            .contentType(ContentType.JSON)
+            .body("{\"apiId\":\"zzzzzzzzzz\",\"stage\":\"$default\"}")
+        .when()
+            .post("/v2/domainnames/" + DOMAIN + "/apimappings")
+        .then()
+            .statusCode(400)
+            .body(containsString("Invalid API identifier specified"));
+
+        given()
+            .contentType(ContentType.JSON)
+            .body("{\"apiId\":\"%s\",\"stage\":\"nosuchstage\"}".formatted(apiId))
+        .when()
+            .post("/v2/domainnames/" + DOMAIN + "/apimappings")
+        .then()
+            .statusCode(400)
+            .body(containsString("Invalid stage identifier specified"));
+    }
+
+    @Test
+    @Order(7)
+    void anOmittedAndAnEmptyMappingKeyAreTheSameMapping() {
+        // AWS answers the second with ConflictException, so the two spellings must land on one
+        // record rather than creating two apparent root mappings.
+        String rootMapping = "{\"apiId\":\"%s\",\"stage\":\"$default\"}".formatted(apiId);
+        given()
+            .contentType(ContentType.JSON)
+            .body(rootMapping)
+        .when()
+            .post("/v2/domainnames/" + DOMAIN + "/apimappings")
+        .then()
+            .statusCode(201)
+            .body("apiMappingKey", is(""));
+
+        given()
+            .contentType(ContentType.JSON)
+            .body("{\"apiId\":\"%s\",\"stage\":\"$default\",\"apiMappingKey\":\"\"}".formatted(apiId))
+        .when()
+            .post("/v2/domainnames/" + DOMAIN + "/apimappings")
+        .then()
+            .statusCode(409)
+            .body(containsString("already exists"));
+
+        // And the root mapping is reachable through the v1 endpoint, which spells it "(none)".
+        given()
+        .when()
+            .get("/domainnames/" + DOMAIN + "/basepathmappings/(none)")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(7)
+    void mappingIdsDoNotCollide() {
+        // Ids derived by hashing would collide: "Aa" and "BB" share a Java String hashCode, so a
+        // read or delete by that id would pick between the two mappings arbitrarily.
+        String first = createMapping("Aa");
+        String second = createMapping("BB");
+        org.junit.jupiter.api.Assertions.assertNotEquals(first, second);
+
+        given()
+        .when()
+            .get("/v2/domainnames/" + DOMAIN + "/apimappings/" + first)
+        .then()
+            .statusCode(200)
+            .body("apiMappingKey", is("Aa"));
+
+        given()
+        .when()
+            .get("/v2/domainnames/" + DOMAIN + "/apimappings/" + second)
+        .then()
+            .statusCode(200)
+            .body("apiMappingKey", is("BB"));
+    }
+
+    private String createMapping(String key) {
+        return given()
+                .contentType(ContentType.JSON)
+                .body("{\"apiId\":\"%s\",\"stage\":\"$default\",\"apiMappingKey\":\"%s\"}".formatted(apiId, key))
+            .when()
+                .post("/v2/domainnames/" + DOMAIN + "/apimappings")
+            .then()
+                .statusCode(201)
+                .extract().path("apiMappingId");
+    }
+
+    @Test
+    @Order(8)
     void anApiStillMappedToADomainCannotBeDeleted() {
         // Verified against AWS, which refuses rather than leaving the mapping pointing at an API
         // that no longer exists.
@@ -210,7 +310,7 @@ class ApiGatewayV2DomainNameIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(6)
     void inputsFlociCannotHonourAreRefused() {
         // Accepting these would answer with a domain that behaves differently from the request.
         String[] bodies = {
@@ -251,7 +351,7 @@ class ApiGatewayV2DomainNameIntegrationTest {
             .get("/v2/domainnames/" + DOMAIN + "/apimappings")
         .then()
             .statusCode(200)
-            .body("items[0].apiMappingId", is(apiMappingId));
+            .body("items.apiMappingId", hasItemEqualTo(apiMappingId));
     }
 
     @Test
