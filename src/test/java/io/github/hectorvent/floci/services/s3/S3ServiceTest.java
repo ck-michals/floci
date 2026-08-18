@@ -827,6 +827,42 @@ class S3ServiceTest {
     }
 
     @Test
+    void aMetricsPutRacingABucketDeleteCannotRestoreTheBucket() throws Exception {
+        // A put resolves the bucket record before it writes it back, so a delete landing in between
+        // would be undone by the write. The interleaving is forced rather than raced for: the test
+        // holds the bucket monitor, lets the put resolve the record and block on it, deletes the
+        // bucket from the same thread, and only then releases.
+        var buckets = new InMemoryStorage<String, Bucket>();
+        S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir.resolve("s3-race"), false);
+        service.createBucket("race-bucket", "us-east-1");
+        Bucket record = buckets.get("race-bucket").orElseThrow();
+
+        var putStarted = new java.util.concurrent.CountDownLatch(1);
+        var thrownByPut = new java.util.concurrent.atomic.AtomicReference<Exception>();
+        Thread put = new Thread(() -> {
+            putStarted.countDown();
+            try {
+                service.putBucketMetricsConfiguration("race-bucket", "id", "<Id>id</Id>");
+            } catch (Exception e) {
+                thrownByPut.set(e);
+            }
+        });
+
+        synchronized (record) {
+            put.start();
+            putStarted.await();
+            Thread.sleep(150);
+            service.deleteBucket("race-bucket");
+        }
+        put.join(30_000);
+
+        assertTrue(buckets.get("race-bucket").isEmpty(),
+                "the deleted bucket was restored by the concurrent metrics put");
+        assertEquals("NoSuchBucket",
+                assertInstanceOf(AwsException.class, thrownByPut.get()).getErrorCode());
+    }
+
+    @Test
     void concurrentMetricsConfigurationPutsAllSurvive() throws Exception {
         // Each put reads the configuration map, adds to it and writes it back, so without a shared
         // monitor concurrent puts of different ids overwrite each other's work.

@@ -327,23 +327,7 @@ public class S3Controller {
             // Must be handled here: an unmatched subresource falls through to CreateBucket below,
             // which answers a metrics call with BucketAlreadyOwnedByYou.
             if (hasQueryParam(uriInfo, "metrics")) {
-                String id = uriInfo.getQueryParameters().getFirst("id");
-                // The id identifies the configuration, so a request without one is refused rather
-                // than guessed at. AWS's own answer here was not verified, so floci reuses the
-                // rejection its DeleteBucketMetricsConfiguration gives.
-                if (id == null) {
-                    throw new AwsException("InvalidArgument", "The metrics id must be specified.", 400);
-                }
-                S3MetricsConfiguration configuration =
-                        S3MetricsConfiguration.parse(new String(body, StandardCharsets.UTF_8));
-                // AWS rejects a body whose Id disagrees with the id in the query string.
-                if (!id.equals(configuration.id())) {
-                    throw new AwsException("MalformedXML",
-                            "The XML you provided was not well-formed or did not validate against our "
-                                    + "published schema", 400);
-                }
-                s3Service.putBucketMetricsConfiguration(bucket, id, configuration.innerXml());
-                return Response.noContent().build();
+                return handlePutBucketMetricsConfiguration(bucket, uriInfo, body);
             }
 
             String locationConstraint = null;
@@ -429,13 +413,8 @@ public class S3Controller {
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "metrics")) {
-                // Likewise this must not fall through to deleting the bucket. AWS answers an
-                // unknown id with NoSuchConfiguration rather than treating the delete as a no-op.
-                String id = uriInfo.getQueryParameters().getFirst("id");
-                if (id == null) {
-                    throw new AwsException("InvalidArgument", "The metrics id must be specified.", 400);
-                }
-                s3Service.deleteBucketMetricsConfiguration(bucket, id);
+                // Likewise this must not fall through to deleting the bucket.
+                s3Service.deleteBucketMetricsConfiguration(bucket, requireMetricsId(uriInfo));
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "accelerate")) {
@@ -1817,6 +1796,34 @@ public class S3Controller {
     private Response handleGetBucketTagging(String bucket) {
         Map<String, String> tags = s3Service.getBucketTagging(bucket);
         return Response.ok(buildTaggingXml(tags)).type(MediaType.APPLICATION_XML).build();
+    }
+
+    // --- Metrics Configurations ---
+
+    private Response handlePutBucketMetricsConfiguration(String bucket, UriInfo uriInfo, byte[] body) {
+        String id = requireMetricsId(uriInfo);
+        S3MetricsConfiguration configuration =
+                S3MetricsConfiguration.parse(new String(body, StandardCharsets.UTF_8));
+        // AWS rejects a body whose Id disagrees with the id in the query string.
+        if (!id.equals(configuration.id())) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our "
+                            + "published schema", 400);
+        }
+        s3Service.putBucketMetricsConfiguration(bucket, id, configuration.innerXml());
+        return Response.noContent().build();
+    }
+
+    /**
+     * The id identifies the configuration, so a request without one is refused rather than guessed
+     * at. AWS's own answer here was not verified, so floci gives one rejection for both verbs.
+     */
+    private String requireMetricsId(UriInfo uriInfo) {
+        String id = uriInfo.getQueryParameters().getFirst("id");
+        if (id == null) {
+            throw new AwsException("InvalidArgument", "The metrics id must be specified.", 400);
+        }
+        return id;
     }
 
     // --- Object Tagging ---

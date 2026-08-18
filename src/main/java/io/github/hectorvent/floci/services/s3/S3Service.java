@@ -228,7 +228,19 @@ public class S3Service implements Resettable {
 
     public void deleteBucket(String bucketName) {
         ensureBucketExists(bucketName);
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
 
+        // Takes the bucket monitor that the bucket-scoped mutations take: a mutation that read the
+        // record before the delete would otherwise write it back afterwards, restoring the bucket.
+        synchronized (bucket) {
+            deleteBucketLocked(bucketName);
+        }
+        LOG.infov("Deleted bucket: {0}", bucketName);
+    }
+
+    private void deleteBucketLocked(String bucketName) {
         // Check if bucket is empty
         List<S3Object> objects = listObjects(bucketName, null, null, 1);
         if (!objects.isEmpty()) {
@@ -243,7 +255,6 @@ public class S3Service implements Resettable {
         } else {
             deleteDirectory(dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId()).resolve(bucketName));
         }
-        LOG.infov("Deleted bucket: {0}", bucketName);
     }
 
     public List<Bucket> listBuckets() {
@@ -1636,7 +1647,7 @@ public class S3Service implements Resettable {
 
     // --- Metrics Configurations ---
 
-    private static final String METRICS_XMLNS = "http://s3.amazonaws.com/doc/2006-03-01/";
+    private static final String METRICS_XML_DECLARATION = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
 
     /**
      * Stores a CloudWatch request metrics configuration under {@code id}, replacing any
@@ -1649,6 +1660,7 @@ public class S3Service implements Resettable {
         // bucket-scoped mutations: without it two concurrent puts of different ids both start from
         // the same map and one of the configurations is lost.
         synchronized (bucket) {
+            requireStillPresent(bucketName);
             Map<String, String> configurations = bucket.getMetricsConfigurations() != null
                     ? new java.util.LinkedHashMap<>(bucket.getMetricsConfigurations())
                     : new java.util.LinkedHashMap<>();
@@ -1666,8 +1678,11 @@ public class S3Service implements Resettable {
         if (innerXml == null) {
             throw noSuchMetricsConfiguration();
         }
-        return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-                + "<MetricsConfiguration xmlns=\"" + METRICS_XMLNS + "\">" + innerXml + "</MetricsConfiguration>";
+        return METRICS_XML_DECLARATION + new XmlBuilder()
+                .start("MetricsConfiguration", AwsNamespaces.S3)
+                .raw(innerXml)
+                .end("MetricsConfiguration")
+                .build();
     }
 
     /**
@@ -1680,11 +1695,15 @@ public class S3Service implements Resettable {
         Map<String, String> configurations = bucket.getMetricsConfigurations() != null
                 ? bucket.getMetricsConfigurations() : Map.of();
 
-        StringBuilder xml = new StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-                .append("<ListMetricsConfigurationsResult xmlns=\"").append(METRICS_XMLNS).append("\">");
-        configurations.keySet().stream().sorted().forEach(id ->
-                xml.append("<MetricsConfiguration>").append(configurations.get(id)).append("</MetricsConfiguration>"));
-        return xml.append("<IsTruncated>false</IsTruncated></ListMetricsConfigurationsResult>").toString();
+        XmlBuilder xml = new XmlBuilder().start("ListMetricsConfigurationsResult", AwsNamespaces.S3);
+        configurations.keySet().stream().sorted().forEach(id -> xml
+                .start("MetricsConfiguration")
+                .raw(configurations.get(id))
+                .end("MetricsConfiguration"));
+        return METRICS_XML_DECLARATION + xml
+                .elem("IsTruncated", false)
+                .end("ListMetricsConfigurationsResult")
+                .build();
     }
 
     public void deleteBucketMetricsConfiguration(String bucketName, String id) {
@@ -1692,6 +1711,7 @@ public class S3Service implements Resettable {
         // Same monitor as the put: the existence check and the write have to be one step, or a
         // concurrent put of another id is dropped by the write that follows it.
         synchronized (bucket) {
+            requireStillPresent(bucketName);
             Map<String, String> configurations = bucket.getMetricsConfigurations();
             if (configurations == null || !configurations.containsKey(id)) {
                 throw noSuchMetricsConfiguration();
@@ -1708,6 +1728,16 @@ public class S3Service implements Resettable {
         return bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
+    }
+
+    /**
+     * Re-reads the bucket under its monitor. A caller that resolved the record before a concurrent
+     * DeleteBucket must not write it back afterwards, which would restore the deleted bucket.
+     */
+    private void requireStillPresent(String bucketName) {
+        if (bucketStore.get(bucketName).isEmpty()) {
+            throw new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404);
+        }
     }
 
     private static AwsException noSuchMetricsConfiguration() {

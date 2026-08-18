@@ -82,6 +82,40 @@ class S3MetricsConfigurationTest {
     }
 
     @Test
+    void rejectsFiltersThatAreNotExactlyOnePredicate() {
+        // Verified against AWS: each of these is MalformedXML rather than something to normalize.
+        String bothPrefixAndTag = "<Id>a</Id><Filter><Prefix>logs/</Prefix>"
+                + "<Tag><Key>env</Key><Value>prod</Value></Tag></Filter>";
+        String emptyFilter = "<Id>a</Id><Filter></Filter>";
+        String andWithOnePredicate = "<Id>a</Id><Filter><And><Prefix>logs/</Prefix></And></Filter>";
+        String andWithOneTag = "<Id>a</Id><Filter><And>"
+                + "<Tag><Key>env</Key><Value>prod</Value></Tag></And></Filter>";
+        String tagWithoutAKey = "<Id>a</Id><Filter><Tag><Value>prod</Value></Tag></Filter>";
+        // botocore marks both Key and Value required on a Tag.
+        String tagWithoutAValue = "<Id>a</Id><Filter><Tag><Key>env</Key></Tag></Filter>";
+        String unknownPredicate = "<Id>a</Id><Filter><Something>x</Something></Filter>";
+        String andWithAnUnknownConjunct = "<Id>a</Id><Filter><And><Prefix>logs/</Prefix>"
+                + "<Something>x</Something></And></Filter>";
+
+        for (String invalid : new String[]{
+                bothPrefixAndTag, emptyFilter, andWithOnePredicate, andWithOneTag, tagWithoutAKey,
+                tagWithoutAValue, unknownPredicate, andWithAnUnknownConjunct}) {
+            AwsException e = assertThrows(AwsException.class, () -> S3MetricsConfiguration.parse(body(invalid)),
+                    () -> "expected rejection of: " + invalid);
+            assertEquals("MalformedXML", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void acceptsAnAndOfExactlyTwoPredicates() {
+        // The boundary the rejection is drawn at: two conjuncts are legal, one is not.
+        assertEquals("<Id>a</Id><Filter><And><Prefix>logs/</Prefix>"
+                        + "<Tag><Key>env</Key><Value>prod</Value></Tag></And></Filter>",
+                S3MetricsConfiguration.parse(body("<Id>a</Id><Filter><And><Prefix>logs/</Prefix>"
+                        + "<Tag><Key>env</Key><Value>prod</Value></Tag></And></Filter>")).innerXml());
+    }
+
+    @Test
     void refusesToResolveExternalEntities() {
         // The parser must not read local files on behalf of a request body.
         String xxe = "<?xml version=\"1.0\"?>"

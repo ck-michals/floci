@@ -2,19 +2,10 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
-import org.xml.sax.InputSource;
-import org.xml.sax.SAXException;
+import io.github.hectorvent.floci.core.common.XmlParser;
 
-import javax.xml.XMLConstants;
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.parsers.ParserConfigurationException;
-import java.io.IOException;
-import java.io.StringReader;
+import java.util.List;
+import java.util.Map;
 
 /**
  * A parsed {@code MetricsConfiguration} request body, reduced to its id and a canonical
@@ -27,6 +18,8 @@ import java.io.StringReader;
  */
 record S3MetricsConfiguration(String id, String innerXml) {
 
+    private static final String ROOT = "MetricsConfiguration";
+
     /** AWS reports a body that does not match the published schema this way. */
     private static AwsException malformed() {
         return new AwsException("MalformedXML",
@@ -34,111 +27,91 @@ record S3MetricsConfiguration(String id, String innerXml) {
     }
 
     static S3MetricsConfiguration parse(String xml) {
-        if (xml == null || xml.isBlank()) {
+        if (xml == null || xml.isBlank() || !ROOT.equals(XmlParser.rootElementName(xml))) {
             throw malformed();
         }
 
-        Document document;
-        try {
-            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-            factory.setNamespaceAware(true);
-            factory.setExpandEntityReferences(false);
-            factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-            factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-
-            DocumentBuilder builder = factory.newDocumentBuilder();
-            document = builder.parse(new InputSource(new StringReader(xml)));
-        } catch (ParserConfigurationException | SAXException | IOException e) {
-            throw malformed();
-        }
-
-        Element root = document.getDocumentElement();
-        if (root == null || !"MetricsConfiguration".equals(localName(root))) {
-            throw malformed();
-        }
-
-        String id = textOf(firstChild(root, "Id"));
+        String id = XmlParser.extractFirst(xml, "Id", null);
         if (id == null || id.isBlank()) {
             throw malformed();
         }
 
-        StringBuilder inner = new StringBuilder();
-        inner.append("<Id>").append(XmlBuilder.escape(id)).append("</Id>");
-
-        Element filter = firstChild(root, "Filter");
-        if (filter != null) {
-            inner.append("<Filter>").append(filterXml(filter)).append("</Filter>");
+        XmlBuilder inner = new XmlBuilder().elem("Id", id);
+        if (XmlParser.childElementNames(xml, ROOT).contains("Filter")) {
+            inner.start("Filter").raw(filterXml(xml)).end("Filter");
         }
-        return new S3MetricsConfiguration(id, inner.toString());
+        return new S3MetricsConfiguration(id, inner.build());
     }
 
     /**
-     * Serializes a filter. A filter is a prefix, an object tag, an access point ARN, or an And
-     * conjunction of those, so each is emitted only when present.
+     * Serializes the filter. A filter is exactly one of a prefix, an object tag, an access point
+     * ARN, or an And conjunction: AWS answers MalformedXML for a filter naming none of them or
+     * more than one, and for an And holding fewer than two predicates.
      */
-    private static String filterXml(Element filter) {
-        Element and = firstChild(filter, "And");
-        if (and != null) {
-            StringBuilder out = new StringBuilder("<And>");
-            appendIfPresent(out, and, "Prefix");
-            for (Element tag : children(and, "Tag")) {
-                out.append(tagXml(tag));
+    private static String filterXml(String xml) {
+        List<String> predicates = XmlParser.childElementNames(xml, "Filter");
+        if (predicates.size() != 1) {
+            throw malformed();
+        }
+
+        String predicate = predicates.getFirst();
+        return switch (predicate) {
+            case "Prefix", "AccessPointArn" -> new XmlBuilder()
+                    .elem(predicate, requireText(xml, predicate))
+                    .build();
+            case "Tag" -> tagsXml(xml, 1);
+            case "And" -> {
+                List<String> conjuncts = XmlParser.childElementNames(xml, "And");
+                if (conjuncts.size() < 2) {
+                    throw malformed();
+                }
+                XmlBuilder and = new XmlBuilder().start("And");
+                if (conjuncts.contains("Prefix")) {
+                    and.elem("Prefix", requireText(xml, "Prefix"));
+                }
+                long tagCount = conjuncts.stream().filter("Tag"::equals).count();
+                if (tagCount > 0) {
+                    and.raw(tagsXml(xml, (int) tagCount));
+                }
+                if (conjuncts.contains("AccessPointArn")) {
+                    and.elem("AccessPointArn", requireText(xml, "AccessPointArn"));
+                }
+                // Every conjunct has to be one floci understands, or the filter it stores would
+                // not be the filter that was sent.
+                if (conjuncts.size() != tagCount + (conjuncts.contains("Prefix") ? 1 : 0)
+                        + (conjuncts.contains("AccessPointArn") ? 1 : 0)) {
+                    throw malformed();
+                }
+                yield and.end("And").build();
             }
-            appendIfPresent(out, and, "AccessPointArn");
-            return out.append("</And>").toString();
-        }
-
-        StringBuilder out = new StringBuilder();
-        appendIfPresent(out, filter, "Prefix");
-        Element tag = firstChild(filter, "Tag");
-        if (tag != null) {
-            out.append(tagXml(tag));
-        }
-        appendIfPresent(out, filter, "AccessPointArn");
-        return out.toString();
+            default -> throw malformed();
+        };
     }
 
-    private static String tagXml(Element tag) {
-        return "<Tag><Key>" + XmlBuilder.escape(textOf(firstChild(tag, "Key")))
-                + "</Key><Value>" + XmlBuilder.escape(textOf(firstChild(tag, "Value")))
-                + "</Value></Tag>";
-    }
-
-    private static void appendIfPresent(StringBuilder out, Element parent, String name) {
-        Element child = firstChild(parent, name);
-        if (child != null) {
-            out.append('<').append(name).append('>')
-                    .append(XmlBuilder.escape(textOf(child)))
-                    .append("</").append(name).append('>');
+    /**
+     * Serializes {@code expected} tags. A tag carries both a key and a value, so a pair short of
+     * the element count means one of them was missing.
+     */
+    private static String tagsXml(String xml, int expected) {
+        Map<String, String> tags = XmlParser.extractPairs(xml, "Tag", "Key", "Value");
+        if (tags.size() != expected) {
+            throw malformed();
         }
-    }
-
-    private static Element firstChild(Element parent, String name) {
-        for (Element child : children(parent, name)) {
-            return child;
-        }
-        return null;
-    }
-
-    private static java.util.List<Element> children(Element parent, String name) {
-        java.util.List<Element> matches = new java.util.ArrayList<>();
-        NodeList nodes = parent.getChildNodes();
-        for (int i = 0; i < nodes.getLength(); i++) {
-            Node node = nodes.item(i);
-            if (node.getNodeType() == Node.ELEMENT_NODE && name.equals(localName((Element) node))) {
-                matches.add((Element) node);
+        XmlBuilder out = new XmlBuilder();
+        tags.forEach((key, value) -> {
+            if (key.isBlank() || value == null) {
+                throw malformed();
             }
+            out.start("Tag").elem("Key", key).elem("Value", value).end("Tag");
+        });
+        return out.build();
+    }
+
+    private static String requireText(String xml, String element) {
+        String value = XmlParser.extractFirst(xml, element, null);
+        if (value == null) {
+            throw malformed();
         }
-        return matches;
-    }
-
-    private static String localName(Element element) {
-        return element.getLocalName() != null ? element.getLocalName() : element.getNodeName();
-    }
-
-    private static String textOf(Element element) {
-        return element == null ? null : element.getTextContent().trim();
+        return value;
     }
 }
