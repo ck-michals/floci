@@ -257,6 +257,47 @@ class ApiGatewayV2DomainNameIntegrationTest {
 
     @Test
     @Order(7)
+    void rootSpellingsCollapseToOneRecordOnWrite() {
+        // The read path has always normalised the root to "(none)"; the write path now does too, so
+        // "/" cannot end up stored beside it as a second record that means the same thing — and a
+        // mapping created as "" can be read back as "", which it could not before.
+        String otherDomain = "root-spelling.example.com";
+        given()
+            .contentType(ContentType.JSON)
+            .body("""
+                    {"domainName":"%s","domainNameConfigurations":[{"endpointType":"REGIONAL"}]}
+                    """.formatted(otherDomain))
+        .when()
+            .post("/v2/domainnames")
+        .then()
+            .statusCode(201);
+
+        given()
+            .contentType(ContentType.JSON)
+            .body("{\"restApiId\":\"%s\",\"stage\":\"$default\",\"basePath\":\"\"}".formatted(apiId))
+        .when()
+            .post("/domainnames/" + otherDomain + "/basepathmappings")
+        .then()
+            .statusCode(201);
+
+        given()
+        .when()
+            .get("/domainnames/" + otherDomain + "/basepathmappings/(none)")
+        .then()
+            .statusCode(200);
+
+        // One record, whichever spelling created it.
+        given()
+        .when()
+            .get("/v2/domainnames/" + otherDomain + "/apimappings")
+        .then()
+            .statusCode(200)
+            .body("items.size()", is(1))
+            .body("items[0].apiMappingKey", is(""));
+    }
+
+    @Test
+    @Order(7)
     void mappingIdsDoNotCollide() {
         // Ids derived by hashing would collide: "Aa" and "BB" share a Java String hashCode, so a
         // read or delete by that id would pick between the two mappings arbitrarily.

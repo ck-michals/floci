@@ -1204,10 +1204,10 @@ public class ApiGatewayController {
         // rather than answering 201 with something unusable.
         requireApiAndStageExist(region, apiId, stage);
 
-        String basePath = canonicalBasePath(
+        String basePath = ApiGatewayService.canonicalBasePath(
                 request.get("apiMappingKey") == null ? null : String.valueOf(request.get("apiMappingKey")));
         boolean keyTaken = service.getBasePathMappings(region, domainName).stream()
-                .anyMatch(existing -> canonicalBasePath(existing.getBasePath()).equals(basePath));
+                .anyMatch(existing -> ApiGatewayService.canonicalBasePath(existing.getBasePath()).equals(basePath));
         if (keyTaken) {
             throw new AwsException("ConflictException",
                     "ApiMapping key already exists for this domain name", 409);
@@ -1962,18 +1962,15 @@ public class ApiGatewayController {
      * same id whichever API created it. The base path is encoded rather than hashed: two base paths
      * sharing a hash would share an id, and a read or delete by that id would pick between them.
      */
-    private static String apiMappingId(BasePathMapping mapping) {
-        return HexFormat.of().formatHex(
-                canonicalBasePath(mapping.getBasePath()).getBytes(StandardCharsets.UTF_8));
-    }
-
-    /**
-     * The shared store keeps the root mapping under {@code (none)}, which v2 expresses as an empty
-     * key. Both spellings have to land on the one record: AWS treats an omitted key and an empty
-     * key as the same mapping and refuses the second as a duplicate.
-     */
-    private static String canonicalBasePath(String basePath) {
-        return basePath == null || basePath.isBlank() || "/".equals(basePath) ? "(none)" : basePath;
+    // Package-private so the identity property can be tested against records that only persisted
+    // state can hold: no API path creates a non-canonical base path any more.
+    static String apiMappingId(BasePathMapping mapping) {
+        // Encoded from the path the record is stored under, not from its canonical form: state
+        // written before writes were canonicalised can hold "/" or "" beside "(none)", and folding
+        // those together would hand several records one id for a read or a delete to choose between.
+        // The prefix keeps an empty stored path from producing an empty id.
+        String storedPath = mapping.getBasePath() == null ? "" : mapping.getBasePath();
+        return "m" + HexFormat.of().formatHex(storedPath.getBytes(StandardCharsets.UTF_8));
     }
 
     private BasePathMapping findApiMapping(String region, String domainName, String apiMappingId) {
