@@ -307,6 +307,34 @@ public class SecretsManagerService {
     }
 
     /**
+     * Marks an existing secret as owned by an AWS service, so that it rotates the way a
+     * service-managed secret does. Ownership is normally set when the owning service creates the
+     * secret; this backfills secrets persisted before floci tracked it. A secret that is already
+     * owned, or that no longer exists, is left as it is.
+     */
+    public void markOwnedByService(String secretId, String owningService, String region) {
+        Secret resolved;
+        try {
+            resolved = resolveSecret(secretId, region);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                return;
+            }
+            throw e;
+        }
+
+        synchronized (lockFor(resolved.getArn())) {
+            Secret secret = resolveSecret(resolved.getArn(), region);
+            if (secret.getOwningService() != null) {
+                return;
+            }
+            secret.setOwningService(owningService);
+            store.put(regionKey(region, secret.getName()), secret);
+            LOG.infov("Marked secret {0} as owned by {1}", secret.getName(), owningService);
+        }
+    }
+
+    /**
      * Claims the single Secrets Manager target-attachment slot for a CloudFormation resource.
      *
      * @return {@code true} when this call created the claim, or {@code false} when the same

@@ -36,7 +36,9 @@ import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -733,6 +735,30 @@ public class RdsService implements Resettable {
     private String resourceRegionOrDefault(String resourceName) {
         return resourceName != null && resourceName.startsWith("arn:")
                 ? regionFromArn(resourceName) : regionResolver.getDefaultRegion();
+    }
+
+    /**
+     * Marks the master user secrets of persisted instances as owned by RDS. An instance stored
+     * before floci tracked ownership refers to a secret that would otherwise read as an ordinary
+     * one, and so would refuse the Lambda-free rotation these secrets are rotated with. RDS state
+     * is what makes the secret managed, so the instance is what this reads — never the name.
+     */
+    void backfillManagedSecretOwnership(@Observes StartupEvent event) {
+        if (secretsManagerService == null) {
+            return;
+        }
+        for (DbInstance instance : allInstances()) {
+            String secretArn = instance.getMasterUserSecretArn();
+            if (secretArn == null) {
+                continue;
+            }
+            try {
+                secretsManagerService.markOwnedByService(
+                        secretArn, MANAGED_SECRET_OWNING_SERVICE, regionFromArn(secretArn));
+            } catch (RuntimeException e) {
+                LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
+            }
+        }
     }
 
     private void attachManagedMasterUserSecret(DbInstance instance, String region, String kmsKeyId) {

@@ -374,6 +374,32 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void markOwnedByServiceLetsAPersistedSecretRotateAsManaged() {
+        // A secret stored before floci tracked ownership deserializes without an owning service.
+        service.createSecret("rds!db-1234", "value", null, null, null, null, REGION);
+        assertThrows(AwsException.class, () ->
+                service.rotateSecret("rds!db-1234", null, null,
+                        new Secret.RotationRules(7, null, null), true, REGION));
+
+        service.markOwnedByService("rds!db-1234", "rds", REGION);
+
+        assertEquals("rds", service.describeSecret("rds!db-1234", REGION).getOwningService());
+        assertTrue(service.rotateSecret("rds!db-1234", null, null,
+                new Secret.RotationRules(7, null, null), true, REGION).isRotationEnabled());
+    }
+
+    @Test
+    void markOwnedByServiceKeepsAnExistingOwnerAndToleratesAMissingSecret() {
+        service.createSecret("rds!db-1234", "value", null, null, null, null, "rds", REGION);
+
+        service.markOwnedByService("rds!db-1234", "redshift", REGION);
+        assertEquals("rds", service.describeSecret("rds!db-1234", REGION).getOwningService());
+
+        // A backfill runs over whatever state it finds, so a secret that is gone is not an error.
+        assertDoesNotThrow(() -> service.markOwnedByService("no-such-secret", "rds", REGION));
+    }
+
+    @Test
     void ordinarySecretNamedLikeAnRdsSecretStillNeedsALambdaArn() {
         // Ownership is a property of the secret, not of its name: anyone may create a secret
         // called rds!something, and that must not grant it service-managed rotation.

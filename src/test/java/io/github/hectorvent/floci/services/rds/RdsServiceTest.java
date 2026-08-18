@@ -312,6 +312,47 @@ class RdsServiceTest {
     }
 
     @Test
+    void backfillMarksMasterUserSecretsOfPersistedInstances() {
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        String secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-secret";
+        secret.setArn(secretArn);
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq(null), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        service.createDbInstance("mydb", "postgres", "13",
+                "admin", null, "dbname", "db.t3.micro",
+                20, true, null, null, null, true, null);
+
+        // An instance persisted by a floci that predates ownership tracking still names its
+        // secret, which is what makes that secret managed — the name never is.
+        service.backfillManagedSecretOwnership(null);
+
+        verify(secretsManager).markOwnedByService(secretArn, "rds", "us-east-1");
+    }
+
+    @Test
+    void backfillIgnoresInstancesWithoutAManagedSecret() {
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        service.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        service.backfillManagedSecretOwnership(null);
+
+        verify(secretsManager, never()).markOwnedByService(any(), any(), any());
+    }
+
+    @Test
     void createDbInstanceRejectsUnknownParameterGroup() {
         AwsException exception = assertThrows(AwsException.class, () -> rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",

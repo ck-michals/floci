@@ -485,7 +485,11 @@ public class SecretsManagerJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ARN", secret.getArn());
         response.put("Name", secret.getName());
-        response.put("VersionId", clientRequestToken);
+        // A service-managed secret is rotated in place by its owning service, staging no version
+        // for the request token, so report the version that exists rather than one that would
+        // resolve to nothing.
+        boolean serviceManaged = secret.getOwningService() != null && secret.getCurrentVersionId() != null;
+        response.put("VersionId", serviceManaged ? secret.getCurrentVersionId() : clientRequestToken);
         return Response.ok(response).build();
     }
 

@@ -249,6 +249,26 @@ class SecretsManagerJsonHandlerTest {
     }
 
     @Test
+    void rotateServiceManagedSecretReturnsAVersionThatResolves() {
+        service.createSecret("rds!db-9012", "value", null, null, null, null, "rds", REGION);
+
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "rds!db-9012");
+        rotateReq.putObject("RotationRules").put("AutomaticallyAfterDays", 7);
+        ObjectNode rotated = (ObjectNode) handler.handle("RotateSecret", rotateReq, REGION).getEntity();
+
+        // Nothing stages a version for the request token here, so the reported VersionId has to be
+        // one a caller can actually read back.
+        ObjectNode getReq = MAPPER.createObjectNode();
+        getReq.put("SecretId", "rds!db-9012");
+        getReq.put("VersionId", rotated.get("VersionId").asText());
+        Response response = handler.handle("GetSecretValue", getReq, REGION);
+
+        assertThat(response.getStatus(), is(200));
+        assertThat(((ObjectNode) response.getEntity()).get("SecretString").asText(), is("value"));
+    }
+
+    @Test
     void listSecretsResponseIncludesKmsKeyId() {
         ObjectNode createReq = MAPPER.createObjectNode();
         createReq.put("Name", "list-kms-secret");
