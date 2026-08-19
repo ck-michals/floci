@@ -1119,6 +1119,40 @@ class RdsServiceTest {
     }
 
     @Test
+    void aParameterGroupPersistedWithoutAnArnGetsOneOnFirstRead() {
+        // Only creation assigned the ARN, so a group written by an earlier version would never
+        // get one — and the ARN is what a caller tags by, so the group could not be tagged at all.
+        String accountId = "123456789012";
+        InMemoryStorage<String, DbParameterGroup> rawParameterGroups = new InMemoryStorage<>();
+        InMemoryStorage<String, DbClusterParameterGroup> rawClusterParameterGroups =
+                new InMemoryStorage<>();
+        rawParameterGroups.put("legacy-pg", new DbParameterGroup(
+                "legacy-pg", "postgres16", "legacy"));
+        rawClusterParameterGroups.put("legacy-cpg", new DbClusterParameterGroup(
+                "legacy-cpg", "aurora-postgresql16", "legacy"));
+        RdsService service = new RdsService(
+                containerManager, proxyManager, ec2Service,
+                new RegionResolver("us-east-1", accountId), config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new AccountAwareStorageBackend<>(rawParameterGroups, null, accountId),
+                new AccountAwareStorageBackend<>(rawClusterParameterGroups, null, accountId),
+                new InMemoryStorage<>());
+
+        assertEquals("arn:aws:rds:us-east-1:" + accountId + ":pg:legacy-pg",
+                service.getDbParameterGroup("legacy-pg", "us-east-1").getDbParameterGroupArn());
+        assertEquals("arn:aws:rds:us-east-1:" + accountId + ":cluster-pg:legacy-cpg",
+                service.getDbClusterParameterGroup("legacy-cpg", "us-east-1")
+                        .getDbClusterParameterGroupArn());
+
+        // And with an ARN it can be tagged, which is the point of backfilling it.
+        service.addTagsToResource(
+                "arn:aws:rds:us-east-1:" + accountId + ":cluster-pg:legacy-cpg",
+                Map.of("env", "upgraded"), "us-east-1");
+        assertEquals(Map.of("env", "upgraded"), service.listTagsForResource(
+                "arn:aws:rds:us-east-1:" + accountId + ":cluster-pg:legacy-cpg", "us-east-1"));
+    }
+
+    @Test
     void rawLegacyParameterGroupsCannotBeClaimedByANonDefaultAccount() {
         String defaultAccount = "123456789012";
         String otherAccount = "222222222222";

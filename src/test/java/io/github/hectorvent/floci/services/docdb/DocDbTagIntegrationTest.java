@@ -159,10 +159,10 @@ class DocDbTagIntegrationTest {
 
     @Test
     @Order(6)
-    void anArnInAnotherRegionOrAccountIsRejected() {
-        // Storage is keyed by identifier alone, so without this check an ARN naming another
-        // region would be answered with this caller's cluster. A live account gives one message
-        // for both cases.
+    void anArnInAnotherRegionOrAccountIsNotThisCluster() {
+        // Routing matches the whole stored ARN, so neither of these is a DocumentDB record and
+        // RDS answers them — the point being that this caller's cluster is never what comes back
+        // for an ARN naming another region or account.
         for (String foreign : new String[]{
                 "arn:aws:rds:eu-west-1:000000000000:cluster:" + CLUSTER,
                 "arn:aws:rds:us-east-1:111122223333:cluster:" + CLUSTER}) {
@@ -171,7 +171,8 @@ class DocDbTagIntegrationTest {
             .when().post("/")
             .then()
                 .statusCode(400)
-                .body(containsString("does not match an RDS resource in this region"));
+                .body(containsString("InvalidParameterValue"))
+                .body(not(containsString("<Key>env</Key>")));
         }
     }
 
@@ -185,6 +186,49 @@ class DocDbTagIntegrationTest {
             // Not a DocumentDB record, so this one stays with RDS, which owns the ARN space.
             .statusCode(404)
             .body(containsString("DBClusterNotFoundFault"));
+    }
+
+    @Test
+    @Order(6)
+    void anRdsResourceOfTheSameNameKeepsItsOwnTags() {
+        // RDS and DocumentDB share one ARN space. A parameter group named like this cluster is a
+        // different resource, and routing on the trailing name alone would answer it, or mutate
+        // it, out of DocumentDB's store.
+        query("CreateDBParameterGroup")
+                .formParam("DBParameterGroupName", CLUSTER)
+                .formParam("DBParameterGroupFamily", "postgres15")
+                .formParam("Description", "same name, different service")
+        .when().post("/")
+        .then().statusCode(200);
+
+        query("AddTagsToResource")
+                .formParam("ResourceName", "arn:aws:rds:us-east-1:000000000000:pg:" + CLUSTER)
+                .formParam("Tags.Tag.1.Key", "owner")
+                .formParam("Tags.Tag.1.Value", "rds")
+        .when().post("/")
+        .then().statusCode(200);
+
+        // The parameter group has only its own tag...
+        query("ListTagsForResource")
+                .formParam("ResourceName", "arn:aws:rds:us-east-1:000000000000:pg:" + CLUSTER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Value>rds</Value>"))
+            .body(not(containsString("<Key>env</Key>")));
+
+        // ...and the cluster is untouched by it.
+        query("ListTagsForResource")
+                .formParam("ResourceName", CLUSTER_ARN)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Key>env</Key>"))
+            .body(not(containsString("<Value>rds</Value>")));
+
+        query("DeleteDBParameterGroup")
+                .formParam("DBParameterGroupName", CLUSTER)
+        .when().post("/").then().statusCode(200);
     }
 
     @Test

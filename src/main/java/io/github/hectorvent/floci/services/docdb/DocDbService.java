@@ -130,6 +130,24 @@ public class DocDbService {
         return clusters.get(id).isPresent();
     }
 
+    /**
+     * Whether an ARN names a DocumentDB cluster or instance, matched against the stored ARN.
+     *
+     * <p>RDS and DocumentDB share the {@code arn:aws:rds:...} space, so the trailing identifier
+     * alone does not identify a service: an RDS resource whose name a DocumentDB record happens to
+     * share would be answered from the wrong store. The full ARN settles region, account, type and
+     * name in one comparison, as the db-cluster-id filter already does.
+     */
+    public boolean hasResourceWithArn(String arn) {
+        if (arn == null || !arn.startsWith("arn:")) {
+            return false;
+        }
+        return clusters.scan(k -> true).stream()
+                        .anyMatch(c -> arn.equalsIgnoreCase(c.getDbClusterArn()))
+                || instances.scan(k -> true).stream()
+                        .anyMatch(i -> arn.equalsIgnoreCase(i.getDbInstanceArn()));
+    }
+
     public boolean hasInstance(String id) {
         if (id == null || id.isBlank()) {
             return false;
