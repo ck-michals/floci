@@ -366,7 +366,10 @@ public class DocDbQueryHandler {
                 if (key == null) {
                     break;
                 }
-                tags.put(key, params.getFirst(prefix + "." + i + ".Value"));
+                // A key given without a value is stored as an empty value, as AWS stores it —
+                // a null would also break the immutable copy the read hands back.
+                String value = params.getFirst(prefix + "." + i + ".Value");
+                tags.put(key, value == null ? "" : value);
             }
         }
         return tags;

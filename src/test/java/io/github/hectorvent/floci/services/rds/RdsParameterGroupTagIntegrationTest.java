@@ -94,6 +94,7 @@ class RdsParameterGroupTagIntegrationTest {
                 .formParam("ResourceName", CLUSTER_PG_ARN)
                 .formParam("Tags.Tag.1.Key", "env")
                 .formParam("Tags.Tag.1.Value", "changed")
+                .formParam("Tags.Tag.2.Key", "novalue")
         .when().post("/")
         .then().statusCode(200);
 
@@ -102,11 +103,13 @@ class RdsParameterGroupTagIntegrationTest {
         .when().post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<Value>changed</Value>"));
+            .body(containsString("<Value>changed</Value>"))
+            // A key given without a value reads back empty, as it does on a live account.
+            .body(containsString("<Key>novalue</Key><Value></Value>"));
 
         query("RemoveTagsFromResource")
                 .formParam("ResourceName", CLUSTER_PG_ARN)
-                .formParam("TagKeys.member.1", "team")
+                .formParam("TagKeys.member.1", "novalue")
         .when().post("/")
         .then().statusCode(200);
 
@@ -115,6 +118,7 @@ class RdsParameterGroupTagIntegrationTest {
         .when().post("/")
         .then()
             .statusCode(200)
+            .body(not(containsString("<Key>novalue</Key>")))
             .body(containsString("<Key>env</Key>"));
     }
 
