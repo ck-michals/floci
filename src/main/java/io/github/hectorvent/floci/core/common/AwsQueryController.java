@@ -302,9 +302,17 @@ public class AwsQueryController {
                 // create an Aurora cluster named like an existing DocumentDB one. Sending a create
                 // to whoever already holds the identifier is what answers AlreadyExists — and it
                 // stops two services holding one identifier, which no ARN could then tell apart.
-                boolean creating = "CreateDBCluster".equals(action) || "CreateDBInstance".equals(action);
-                if (creating && rdsService.hasClusterOrInstance(clusterId, instanceId, region)) {
-                    yield rdsQueryHandler.handle(action, formParams, region);
+                // Only the identifier being created is checked: CreateDBInstance names the parent
+                // cluster too, and that one existing in RDS is the normal case, not a clash.
+                if ("CreateDBCluster".equals(action)
+                        && rdsService.hasClusterOrInstance(clusterId, null, region)) {
+                    yield xmlErrorResponse("DBClusterAlreadyExistsFault",
+                            "DB Cluster already exists", 400);
+                }
+                if ("CreateDBInstance".equals(action)
+                        && rdsService.hasClusterOrInstance(null, instanceId, region)) {
+                    yield xmlErrorResponse("DBInstanceAlreadyExists",
+                            "DB Instance already exists", 400);
                 }
 
                 if ("neptune".equalsIgnoreCase(engine)

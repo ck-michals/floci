@@ -67,7 +67,10 @@ public class DocDbService {
                         "DocDB cluster " + id + " already exists.", 400);
             }
 
-            String region = regionResolver.getDefaultRegion();
+            // The caller's region, not the configured default: the ARN this create answers with is
+            // the one the caller tags by, and a tag call is checked against the region it is made
+            // from — an ARN naming somewhere else is one its own creator cannot use.
+            String region = regionResolver.getRegion();
 
             DocDbCluster cluster = new DocDbCluster();
             cluster.setDbClusterIdentifier(id);
@@ -225,7 +228,7 @@ public class DocDbService {
                 }
 
                 DocDbCluster cluster = getDbCluster(dbClusterIdentifier);
-                String region = regionResolver.getDefaultRegion();
+                String region = regionResolver.getRegion();
 
                 DocDbInstance instance = new DocDbInstance();
                 instance.setDbInstanceIdentifier(id);

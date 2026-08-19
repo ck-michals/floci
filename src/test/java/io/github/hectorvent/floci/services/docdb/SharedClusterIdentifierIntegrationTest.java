@@ -48,7 +48,13 @@ class SharedClusterIdentifierIntegrationTest {
             + "SignedHeaders=content-type;host, Signature=test";
 
     private static io.restassured.specification.RequestSpecification query(String action) {
-        return given().header("Authorization", AUTH)
+        return queryIn("us-east-1", action);
+    }
+
+    private static io.restassured.specification.RequestSpecification queryIn(String region, String action) {
+        return given().header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=test/20260615/" + region + "/rds/aws4_request, "
+                        + "SignedHeaders=content-type;host, Signature=test")
                 .contentType(URLENC)
                 .formParam("Action", action)
                 .formParam("Version", "2014-10-31");
@@ -136,5 +142,63 @@ class SharedClusterIdentifierIntegrationTest {
 
         docDbService.deleteDbCluster(id);
         rdsService.deleteDbCluster(id, "us-east-1");
+    }
+
+    @Test
+    void aCreateInAnotherRegionCannotTakeAnIdentifierRdsHolds() {
+        // DocumentDB keys records by bare identifier, so signing the create for another region
+        // does not make it a different record — it would shadow the RDS one everywhere.
+        String id = "cross-region-identifier";
+        rdsService.createDbCluster(id, "aurora-postgresql", null, "admin", "secret99password",
+                null, false, null);
+
+        queryIn("eu-west-1", "CreateDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", "docdb")
+                .formParam("MasterUsername", "docdbadmin")
+                .formParam("MasterUserPassword", "secret99password")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("AlreadyExists"));
+
+        rdsService.deleteDbCluster(id, "us-east-1");
+    }
+
+    @Test
+    void aClusterCreatedOutsideTheDefaultRegionIsTaggableFromThere() {
+        // The ARN a create answers with is the one the caller tags by, and a tag call is checked
+        // against the region it is made from — an ARN naming the configured default region would
+        // be one its own creator could not use.
+        String id = "eu-west-cluster";
+        String arn = queryIn("eu-west-1", "CreateDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", "docdb")
+                .formParam("MasterUsername", "docdbadmin")
+                .formParam("MasterUserPassword", "secret99password")
+        .when().post("/")
+        .then().statusCode(200)
+        .extract().path("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.DBClusterArn");
+
+        assertTrue(arn.contains(":eu-west-1:"), "ARN should name the caller's region: " + arn);
+
+        queryIn("eu-west-1", "AddTagsToResource")
+                .formParam("ResourceName", arn)
+                .formParam("Tags.Tag.1.Key", "env")
+                .formParam("Tags.Tag.1.Value", "eu")
+        .when().post("/")
+        .then().statusCode(200);
+
+        queryIn("eu-west-1", "ListTagsForResource")
+                .formParam("ResourceName", arn)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Value>eu</Value>"));
+
+        queryIn("eu-west-1", "DeleteDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("SkipFinalSnapshot", "true")
+        .when().post("/").then().statusCode(200);
     }
 }
