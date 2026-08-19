@@ -1167,6 +1167,23 @@ public class RdsService implements Resettable {
         return cluster;
     }
 
+    /**
+     * Whether RDS holds a cluster or instance under this identifier.
+     *
+     * <p>The RDS-family services share one identifier space — a live account refuses to create an
+     * Aurora cluster named like an existing DocumentDB one with {@code DBClusterAlreadyExistsFault}
+     * — so a create naming an identifier RDS already holds belongs to RDS, whichever engine it
+     * names.
+     */
+    public boolean hasClusterOrInstance(String clusterId, String instanceId, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        boolean cluster = clusterId != null && !clusterId.isBlank()
+                && findClusterForScope(currentAccountId(), effectiveRegion, clusterId) != null;
+        boolean instance = instanceId != null && !instanceId.isBlank()
+                && findInstanceForScope(currentAccountId(), effectiveRegion, instanceId) != null;
+        return cluster || instance;
+    }
+
     public DbCluster getDbCluster(String id) {
         return getDbCluster(id, regionResolver.getDefaultRegion());
     }

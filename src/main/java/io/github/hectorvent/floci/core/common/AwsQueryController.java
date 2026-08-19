@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.elasticache.ElastiCacheQueryHandler;
 import io.github.hectorvent.floci.services.iam.IamQueryHandler;
 import io.github.hectorvent.floci.services.iam.StsQueryHandler;
 import io.github.hectorvent.floci.services.rds.RdsQueryHandler;
+import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.ses.SesQueryHandler;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
@@ -181,6 +182,7 @@ public class AwsQueryController {
     private final NeptuneService neptuneService;
     private final DocDbQueryHandler docDbQueryHandler;
     private final DocDbService docDbService;
+    private final RdsService rdsService;
     private final SqsQueryHandler sqsQueryHandler;
     private final SnsQueryHandler snsQueryHandler;
     private final SesQueryHandler sesQueryHandler;
@@ -203,6 +205,7 @@ public class AwsQueryController {
                               NeptuneService neptuneService,
                               DocDbQueryHandler docDbQueryHandler,
                               DocDbService docDbService,
+                              RdsService rdsService,
                               SqsQueryHandler sqsQueryHandler, SnsQueryHandler snsQueryHandler,
                               SesQueryHandler sesQueryHandler,
                               IamQueryHandler iamQueryHandler, StsQueryHandler stsQueryHandler,
@@ -221,6 +224,7 @@ public class AwsQueryController {
         this.neptuneService = neptuneService;
         this.docDbQueryHandler = docDbQueryHandler;
         this.docDbService = docDbService;
+        this.rdsService = rdsService;
         this.sqsQueryHandler = sqsQueryHandler;
         this.snsQueryHandler = snsQueryHandler;
         this.sesQueryHandler = sesQueryHandler;
@@ -291,6 +295,16 @@ public class AwsQueryController {
                 String engine = formParams.getFirst("Engine");
                 String clusterId = formParams.getFirst("DBClusterIdentifier");
                 String instanceId = formParams.getFirst("DBInstanceIdentifier");
+
+                // One identifier space covers the whole RDS family: a live account refuses to
+                // create an Aurora cluster named like an existing DocumentDB one. Sending a create
+                // to whoever already holds the identifier is what answers AlreadyExists — and it
+                // stops two services holding one identifier, which no ARN could then tell apart.
+                boolean creating = "CreateDBCluster".equals(action) || "CreateDBInstance".equals(action);
+                if (creating && rdsService.hasClusterOrInstance(clusterId, instanceId, region)) {
+                    yield rdsQueryHandler.handle(action, formParams, region);
+                }
+
                 if ("neptune".equalsIgnoreCase(engine)
                         || neptuneService.hasCluster(clusterId)
                         || neptuneService.hasInstance(instanceId)) {
