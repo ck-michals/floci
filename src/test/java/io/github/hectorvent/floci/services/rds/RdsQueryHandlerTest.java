@@ -907,6 +907,108 @@ class RdsQueryHandlerTest {
         assertFalse(body.contains("<Marker>"));
     }
 
+    // ─────────────────────────── Global clusters ───────────────────────────────
+
+    @Test
+    void describeGlobalClusters_returnsEmptyListWith200() {
+        // The RDS and DocumentDB providers both read this on every cluster read, and DocumentDB
+        // signs with the "rds" scope, so this handler answers for both. A live account with no
+        // global clusters answers with an empty list, not an error.
+        Response response = handler.handle("DescribeGlobalClusters", params());
+
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<DescribeGlobalClustersResult>"));
+        assertTrue(body.contains("<GlobalClusters></GlobalClusters>"));
+        assertTrue(body.contains("rds.amazonaws.com/doc/2014-10-31"));
+    }
+
+    @Test
+    void describeGlobalClusters_unknownIdentifierIsNotFound() {
+        // Naming one that does not exist is a different question from listing none, and AWS
+        // answers it with GlobalClusterNotFoundFault rather than an empty list.
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("GlobalClusterIdentifier", "no-such-gc");
+
+        Response response = handler.handle("DescribeGlobalClusters", params);
+
+        String body = (String) response.getEntity();
+        assertEquals(404, response.getStatus());
+        assertTrue(body.contains("<Code>GlobalClusterNotFoundFault</Code>"));
+        assertTrue(body.contains("Global cluster &apos;no-such-gc&apos; not found"));
+    }
+
+    @Test
+    void describeGlobalClusters_blankIdentifierListsRatherThanFailing() {
+        // An empty form field is the SDK omitting the filter, not a request for a cluster named "".
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("GlobalClusterIdentifier", "");
+
+        Response response = handler.handle("DescribeGlobalClusters", params);
+
+        assertEquals(200, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<GlobalClusters></GlobalClusters>"));
+    }
+
+    @Test
+    void describeGlobalClusters_rejectsMaxRecordsOutsideTheAllowedRange() {
+        // A live account rejects this before it looks the identifier up, so an empty model is no
+        // reason to accept a value AWS refuses.
+        for (String value : new String[]{"5", "101", "abc"}) {
+            MultivaluedMap<String, String> params = params();
+            params.putSingle("MaxRecords", value);
+            params.putSingle("GlobalClusterIdentifier", "no-such-gc");
+
+            Response response = handler.handle("DescribeGlobalClusters", params);
+
+            assertEquals(400, response.getStatus(), "MaxRecords=" + value);
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("Invalid value " + value + " for MaxRecords"), body);
+        }
+    }
+
+    @Test
+    void describeGlobalClusters_acceptsMaxRecordsInsideTheAllowedRange() {
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("MaxRecords", "20");
+
+        Response response = handler.handle("DescribeGlobalClusters", params);
+
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void describeGlobalClusters_rejectsAMarkerItNeverIssued() {
+        // No page is ever handed out, so a marker cannot have come from here. AWS checks this
+        // after the identifier, which is why the not-found wins when both are present.
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("Marker", "bogus");
+
+        Response response = handler.handle("DescribeGlobalClusters", params);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("The request token is invalid."));
+
+        params.putSingle("GlobalClusterIdentifier", "no-such-gc");
+        Response withBoth = handler.handle("DescribeGlobalClusters", params);
+        assertEquals(404, withBoth.getStatus());
+        assertTrue(((String) withBoth.getEntity()).contains("GlobalClusterNotFoundFault"));
+    }
+
+    @Test
+    void describeGlobalClusters_acceptsFiltersWithoutValidatingThem() {
+        // Every filter name AWS accepts answers empty here, and Floci carries no list of the
+        // accepted names — rejecting one would refuse a filter a live account allows.
+        MultivaluedMap<String, String> params = params();
+        params.putSingle("Filters.Filter.1.Name", "db-cluster-id");
+        params.putSingle("Filters.Filter.1.Values.Value.1", "anything");
+
+        Response response = handler.handle("DescribeGlobalClusters", params);
+
+        assertEquals(200, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<GlobalClusters></GlobalClusters>"));
+    }
+
     // ──────────────────────────── DBProxy wire shapes ──────────────────────────
 
     @Test

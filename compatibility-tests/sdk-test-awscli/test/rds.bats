@@ -127,3 +127,21 @@ teardown() {
     [ "$(json_get "$output" '.RotationEnabled')" = "true" ]
     [ "$(json_get "$output" '.RotationRules.AutomaticallyAfterDays')" = "7" ]
 }
+
+@test "RDS: describe global clusters returns an empty list" {
+    run aws_cmd rds describe-global-clusters
+    assert_success
+    [ "$(json_get "$output" '.GlobalClusters | length')" = "0" ]
+}
+
+@test "DocDB: describe global clusters answers the read every cluster read makes" {
+    # DocumentDB signs with the rds scope, so this is the same handler the CLI reaches
+    # for either service. Without an answer here a created cluster cannot be read back.
+    run aws_cmd docdb describe-global-clusters
+    assert_success
+    [ "$(json_get "$output" '.GlobalClusters | length')" = "0" ]
+
+    run aws_cmd docdb describe-global-clusters --global-cluster-identifier "bats-absent-gc"
+    assert_failure
+    assert_output --partial "GlobalClusterNotFoundFault"
+}

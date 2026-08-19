@@ -52,6 +52,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `ModifyDBProxyTargetGroup` | Update target-group connection-pool configuration |
 | `DescribeDBProxyTargets` | List a proxy target group's registered targets |
 | `DescribeDBClusterSnapshots` | - |
+| `DescribeGlobalClusters` | List global clusters — always empty, as none are modeled |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |
 | `RemoveTagsFromResource` | Remove tags from a DB resource |
