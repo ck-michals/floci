@@ -112,6 +112,25 @@ class DocDbTagIntegrationTest {
     }
 
     @Test
+    @Order(4)
+    void aKeyWithNoValueReadsBackAsAnEmptyValue() {
+        // AWS stores an empty value for it. Carrying a null instead breaks the read for every
+        // tag on the resource, not just this one.
+        query("AddTagsToResource")
+                .formParam("ResourceName", CLUSTER_ARN)
+                .formParam("Tags.Tag.1.Key", "novalue")
+        .when().post("/")
+        .then().statusCode(200);
+
+        query("ListTagsForResource")
+                .formParam("ResourceName", CLUSTER_ARN)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Key>novalue</Key><Value></Value>"));
+    }
+
+    @Test
     @Order(5)
     void anInstanceCarriesItsOwnTags() {
         query("CreateDBInstance")
