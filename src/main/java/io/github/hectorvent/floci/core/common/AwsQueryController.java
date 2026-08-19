@@ -183,6 +183,8 @@ public class AwsQueryController {
     private final DocDbQueryHandler docDbQueryHandler;
     private final DocDbService docDbService;
     private final RdsService rdsService;
+    /** ARNs already reported as held by both services, so the warning is logged once each. */
+    private final java.util.Set<String> reportedArnCollisions = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final SqsQueryHandler sqsQueryHandler;
     private final SnsQueryHandler snsQueryHandler;
     private final SesQueryHandler sesQueryHandler;
@@ -314,7 +316,7 @@ public class AwsQueryController {
                 if ("docdb".equalsIgnoreCase(engine)
                        || docDbService.hasCluster(clusterId)
                        || docDbService.hasInstance(instanceId)
-                       || namesDocDbResource(formParams.getFirst("ResourceName"))) {
+                       || namesDocDbResource(formParams.getFirst("ResourceName"), region)) {
                         yield docDbQueryHandler.handle(action, formParams);
                 }
                 yield rdsQueryHandler.handle(action, formParams, region);
@@ -343,9 +345,25 @@ public class AwsQueryController {
      * share one ARN space, so a name both services use would otherwise be answered from the wrong
      * store, and an RDS parameter group or option group could be resolved as a cluster. Anything
      * DocumentDB does not hold under that exact ARN stays with RDS.
+     *
+     * <p>State persisted before creates were made to share one identifier space can still hold the
+     * same identifier in both stores. DocumentDB answers it, which is what the identifier checks
+     * above already do for every other action on that record — describe, modify and delete
+     * included — so one identifier keeps one answer. The collision is logged once, because the
+     * RDS record behind it is unreachable on this scope and only deleting one of the two fixes it.
      */
-    private boolean namesDocDbResource(String resourceName) {
-        return docDbService.hasResourceWithArn(resourceName);
+    private boolean namesDocDbResource(String resourceName, String region) {
+        if (!docDbService.hasResourceWithArn(resourceName)) {
+            return false;
+        }
+        String identifier = resourceName.substring(resourceName.lastIndexOf(':') + 1);
+        if (rdsService.hasClusterOrInstance(identifier, identifier, region)
+                && reportedArnCollisions.add(resourceName)) {
+            LOG.warnv("RDS and DocumentDB both hold {0}; DocumentDB answers for it, as it does for "
+                    + "every other action on that identifier. Delete one of the two records.",
+                    resourceName);
+        }
+        return true;
     }
 
     private Response handleCognitoQuery(String action, MultivaluedMap<String, String> formParams, String region) {

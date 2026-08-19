@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.docdb;
 
+import io.github.hectorvent.floci.services.rds.RdsService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -10,6 +12,8 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * One identifier space covers the RDS family.
@@ -30,6 +34,12 @@ class SharedClusterIdentifierIntegrationTest {
                           "floci.services.docdb.mock", "true");
         }
     }
+
+    @Inject
+    DocDbService docDbService;
+
+    @Inject
+    RdsService rdsService;
 
     private static final String ID = "shared-identifier";
     private static final String ARN = "arn:aws:rds:us-east-1:000000000000:cluster:" + ID;
@@ -83,5 +93,48 @@ class SharedClusterIdentifierIntegrationTest {
                 .formParam("DBClusterIdentifier", ID)
                 .formParam("SkipFinalSnapshot", "true")
         .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    void aPersistedCollisionAnswersFromOneStoreForEveryAction() {
+        // State written before creates shared one identifier space can still hold the name twice.
+        // Both records are seeded through the services, as a restart would load them, since the
+        // endpoint now refuses to create the second one.
+        String id = "persisted-collision";
+        String arn = "arn:aws:rds:us-east-1:000000000000:cluster:" + id;
+        rdsService.createDbCluster(id, "aurora-postgresql", null, "admin", "secret99password",
+                null, false, null);
+        docDbService.createDbCluster(id, "5.0.0", "docdbadmin", "secret99password", false);
+
+        // Describe already answers from DocumentDB for such a record, and has since long before
+        // tags existed. Tagging has to agree with it: one identifier, one answer.
+        query("DescribeDBClusters")
+                .formParam("DBClusterIdentifier", id)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("docdb"));
+
+        query("AddTagsToResource")
+                .formParam("ResourceName", arn)
+                .formParam("Tags.Tag.1.Key", "answered-by")
+                .formParam("Tags.Tag.1.Value", "docdb")
+        .when().post("/")
+        .then().statusCode(200);
+
+        query("ListTagsForResource")
+                .formParam("ResourceName", arn)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Value>docdb</Value>"));
+
+        // The write went to the record that answers for the identifier, not to the other one.
+        assertEquals(java.util.Map.of("answered-by", "docdb"),
+                docDbService.listTagsForResource(arn));
+        assertTrue(rdsService.listTagsForResource(arn, "us-east-1").isEmpty());
+
+        docDbService.deleteDbCluster(id);
+        rdsService.deleteDbCluster(id, "us-east-1");
     }
 }
