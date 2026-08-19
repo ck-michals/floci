@@ -475,6 +475,11 @@ public class RdsQueryHandler {
         try {
             DbParameterGroup group = service.createDbParameterGroup(
                     name, family, description, region);
+            // Tags given at create are readable back on a live account.
+            Map<String, String> tags = parseTags(params);
+            if (!tags.isEmpty()) {
+                service.addTagsToResource(group.getDbParameterGroupArn(), tags, region);
+            }
             String result = paramGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateDBParameterGroup", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -576,6 +581,10 @@ public class RdsQueryHandler {
         try {
             DbClusterParameterGroup group = service.createDbClusterParameterGroup(
                     name, family, description, region);
+            Map<String, String> tags = parseTags(params);
+            if (!tags.isEmpty()) {
+                service.addTagsToResource(group.getDbClusterParameterGroupArn(), tags, region);
+            }
             String result = clusterParamGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateDBClusterParameterGroup", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1407,6 +1416,7 @@ public class RdsQueryHandler {
                 .elem("DBParameterGroupName", g.getDbParameterGroupName())
                 .elem("DBParameterGroupFamily", g.getDbParameterGroupFamily())
                 .elem("Description", g.getDescription())
+                .elem("DBParameterGroupArn", g.getDbParameterGroupArn())
                 .build();
     }
 
@@ -1509,6 +1519,7 @@ public class RdsQueryHandler {
                 .elem("DBClusterParameterGroupName", g.getDbClusterParameterGroupName())
                 .elem("DBParameterGroupFamily", g.getDbParameterGroupFamily())
                 .elem("Description", g.getDescription())
+                .elem("DBClusterParameterGroupArn", g.getDbClusterParameterGroupArn())
                 .build();
     }
 
@@ -1675,7 +1686,10 @@ public class RdsQueryHandler {
             if (key == null) {
                 break;
             }
-            tags.put(key, params.getFirst(prefix + "." + i + ".Value"));
+            // A key given without a value is stored as an empty value, as AWS stores it —
+            // a null would also break the immutable copy the read hands back.
+            String value = params.getFirst(prefix + "." + i + ".Value");
+            tags.put(key, value == null ? "" : value);
         }
     }
 

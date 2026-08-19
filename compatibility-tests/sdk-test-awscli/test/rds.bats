@@ -145,3 +145,50 @@ teardown() {
     assert_failure
     assert_output --partial "GlobalClusterNotFoundFault"
 }
+
+@test "RDS: cluster parameter group reports its ARN and carries tags" {
+    CPG="bats-cpg-$(unique_name)"
+    run aws_cmd rds create-db-cluster-parameter-group --db-cluster-parameter-group-name "$CPG" \
+        --db-parameter-group-family aurora-postgresql15 --description "bats" \
+        --tags Key=team,Value=data
+    assert_success
+    arn=$(json_get "$output" '.DBClusterParameterGroup.DBClusterParameterGroupArn')
+    [ -n "$arn" ]
+    [[ "$arn" == *":cluster-pg:$CPG" ]]
+
+    run aws_cmd rds list-tags-for-resource --resource-name "$arn"
+    assert_success
+    assert_output --partial '"Key": "team"'
+
+    aws_cmd rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name "$CPG" >/dev/null 2>&1 || true
+}
+
+@test "DocDB: cluster tags survive create and can be added and removed" {
+    # The tag actions carry only the resource ARN, so this is also the check that they reach
+    # DocumentDB at all rather than the RDS handler, which does not hold its records.
+    CLUSTER_ID="bats-docdb-$(unique_name)"
+    run aws_cmd docdb create-db-cluster --db-cluster-identifier "$CLUSTER_ID" \
+        --engine docdb --master-username docdbadmin --master-user-password "secret99password" \
+        --tags Key=env,Value=bats
+    assert_success
+    arn=$(json_get "$output" '.DBCluster.DBClusterArn')
+
+    run aws_cmd docdb list-tags-for-resource --resource-name "$arn"
+    assert_success
+    assert_output --partial '"Key": "env"'
+
+    run aws_cmd docdb add-tags-to-resource --resource-name "$arn" --tags Key=env,Value=changed Key=extra,Value=yes
+    assert_success
+    run aws_cmd docdb list-tags-for-resource --resource-name "$arn"
+    assert_success
+    assert_output --partial '"Value": "changed"'
+
+    # Removing a key that is not there is not an error on a live account.
+    run aws_cmd docdb remove-tags-from-resource --resource-name "$arn" --tag-keys extra absent
+    assert_success
+    run aws_cmd docdb list-tags-for-resource --resource-name "$arn"
+    assert_success
+    refute_output --partial '"Key": "extra"'
+
+    aws_cmd docdb delete-db-cluster --db-cluster-identifier "$CLUSTER_ID" --skip-final-snapshot >/dev/null 2>&1 || true
+}

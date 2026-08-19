@@ -713,6 +713,21 @@ public class RdsService implements Resettable {
                     proxies.put(dbProxyKey(effectiveRegion, resolvedProxy.getDbProxyName()), updatedProxy);
                 });
             }
+            case "pg" -> {
+                DbParameterGroup group = getDbParameterGroup(resourceId, effectiveRegion);
+                yield new TagHandle(group.getTags(), updated -> {
+                    group.setTags(updated);
+                    putParameterGroupForRegion(resourceId, effectiveRegion, group);
+                });
+            }
+            case "cluster-pg" -> {
+                DbClusterParameterGroup group =
+                        getDbClusterParameterGroup(resourceId, effectiveRegion);
+                yield new TagHandle(group.getTags(), updated -> {
+                    group.setTags(updated);
+                    putClusterParameterGroupForRegion(resourceId, effectiveRegion, group);
+                });
+            }
             case "og" -> {
                 if (managedOptionGroup(resourceId) != null) {
                     throw new AwsException("InvalidOptionGroupStateFault",
@@ -724,7 +739,7 @@ public class RdsService implements Resettable {
                     putOptionGroupForRegion(resourceId, effectiveRegion, group);
                 });
             }
-            // Valid RDS resource types Floci does not model yet (pg, snapshot, ...) — taggable
+            // Valid RDS resource types Floci does not model yet (snapshot, ri, ...) — taggable
             // on real AWS, so the message states the Floci limitation rather than AWS semantics.
             default -> throw new AwsException("InvalidParameterValue",
                     "Tagging for resource type '" + type + "' is not yet implemented by Floci: " + resourceName, 400);
@@ -1150,6 +1165,23 @@ public class RdsService implements Resettable {
         LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint={3}:{4}",
                 id, String.valueOf(mock), engine, endpoint.address(), String.valueOf(endpoint.port()));
         return cluster;
+    }
+
+    /**
+     * Whether RDS holds a cluster or instance under this identifier.
+     *
+     * <p>The RDS-family services share one identifier space — a live account refuses to create an
+     * Aurora cluster named like an existing DocumentDB one with {@code DBClusterAlreadyExistsFault}
+     * — so a create naming an identifier RDS already holds belongs to RDS, whichever engine it
+     * names.
+     */
+    public boolean hasClusterOrInstance(String clusterId, String instanceId, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        boolean cluster = clusterId != null && !clusterId.isBlank()
+                && findClusterForScope(currentAccountId(), effectiveRegion, clusterId) != null;
+        boolean instance = instanceId != null && !instanceId.isBlank()
+                && findInstanceForScope(currentAccountId(), effectiveRegion, instanceId) != null;
+        return cluster || instance;
     }
 
     public DbCluster getDbCluster(String id) {
@@ -2091,6 +2123,7 @@ public class RdsService implements Resettable {
         }
         DbParameterGroup group = new DbParameterGroup(name, family, description);
         group.setRegion(effectiveRegion);
+        group.setDbParameterGroupArn(regionResolver.buildArn("rds", effectiveRegion, "pg:" + name));
         putParameterGroupForRegion(name, effectiveRegion, group);
         return group;
     }
@@ -2239,6 +2272,7 @@ public class RdsService implements Resettable {
         }
         DbClusterParameterGroup group = new DbClusterParameterGroup(name, family, description);
         group.setRegion(effectiveRegion);
+        group.setDbClusterParameterGroupArn(regionResolver.buildArn("rds", effectiveRegion, "cluster-pg:" + name));
         putClusterParameterGroupForRegion(name, effectiveRegion, group);
         return group;
     }
@@ -4213,8 +4247,19 @@ public class RdsService implements Resettable {
             }
         }
         resolved.ifPresent(group -> {
-            if (group.getRegion() == null || group.getRegion().isBlank()) {
-                group.setRegion(effectiveRegion);
+            // A group persisted before either field existed reads back without them. The ARN is
+            // what a caller tags by, so a group that never gets one cannot be tagged at all.
+            boolean regionMissing = group.getRegion() == null || group.getRegion().isBlank();
+            boolean arnMissing = group.getDbParameterGroupArn() == null
+                    || group.getDbParameterGroupArn().isBlank();
+            if (regionMissing || arnMissing) {
+                if (regionMissing) {
+                    group.setRegion(effectiveRegion);
+                }
+                if (arnMissing) {
+                    group.setDbParameterGroupArn(
+                            regionResolver.buildArn("rds", group.getRegion(), "pg:" + groupName));
+                }
                 putParameterGroupForRegion(groupName, effectiveRegion, group);
             }
         });
@@ -4286,8 +4331,17 @@ public class RdsService implements Resettable {
             }
         }
         resolved.ifPresent(group -> {
-            if (group.getRegion() == null || group.getRegion().isBlank()) {
-                group.setRegion(effectiveRegion);
+            boolean regionMissing = group.getRegion() == null || group.getRegion().isBlank();
+            boolean arnMissing = group.getDbClusterParameterGroupArn() == null
+                    || group.getDbClusterParameterGroupArn().isBlank();
+            if (regionMissing || arnMissing) {
+                if (regionMissing) {
+                    group.setRegion(effectiveRegion);
+                }
+                if (arnMissing) {
+                    group.setDbClusterParameterGroupArn(regionResolver.buildArn(
+                            "rds", group.getRegion(), "cluster-pg:" + groupName));
+                }
                 putClusterParameterGroupForRegion(groupName, effectiveRegion, group);
             }
         });

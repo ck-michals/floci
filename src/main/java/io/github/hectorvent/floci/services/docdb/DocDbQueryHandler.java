@@ -13,7 +13,11 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 @ApplicationScoped
 public class DocDbQueryHandler {
@@ -43,6 +47,9 @@ public class DocDbQueryHandler {
                 case "DescribeDBInstances"-> handleDescribeDbInstances(params);
                 case "DeleteDBInstance"   -> handleDeleteDbInstance(params);
                 case "ModifyDBInstance"   -> handleModifyDbInstance(params);
+                case "ListTagsForResource" -> handleListTagsForResource(params);
+                case "AddTagsToResource"   -> handleAddTagsToResource(params);
+                case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(params);
                 default -> AwsQueryResponse.error("UnsupportedOperation",
                         "Operation " + action + " is not supported by DocDB.", AwsNamespaces.RDS, 400);
             };
@@ -71,6 +78,11 @@ public class DocDbQueryHandler {
 
         DocDbCluster cluster = service.createDbCluster(id, engineVersion,
                 masterUsername, masterPassword, iamEnabled);
+        // Tags given at create are readable back on a live account, so they must not be dropped.
+        Map<String, String> tags = parseTags(params);
+        if (!tags.isEmpty()) {
+            service.addTagsToResource(cluster.getDbClusterArn(), tags);
+        }
         return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS,
                 clusterXml(cluster))).build();
     }
@@ -315,5 +327,65 @@ public class DocDbQueryHandler {
             }
         }
         return null;
+    }
+
+    // ── Tags ──────────────────────────────────────────────────────────────────
+
+    private Response handleListTagsForResource(MultivaluedMap<String, String> params) {
+        // Filters are accepted without validation: a live account rejects an unrecognised filter
+        // name, but Floci carries no list of the names it accepts, and the tags of one named
+        // resource are the same answer either way.
+        Map<String, String> tags = service.listTagsForResource(params.getFirst("ResourceName"));
+        XmlBuilder xml = new XmlBuilder().start("TagList");
+        tags.forEach((key, value) -> xml.start("Tag")
+                .elem("Key", key)
+                .elem("Value", value == null ? "" : value)
+                .end("Tag"));
+        xml.end("TagList");
+        return Response.ok(AwsQueryResponse.envelope("ListTagsForResource",
+                AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleAddTagsToResource(MultivaluedMap<String, String> params) {
+        service.addTagsToResource(params.getFirst("ResourceName"), parseTags(params));
+        return Response.ok(AwsQueryResponse.envelope("AddTagsToResource", AwsNamespaces.RDS, "")).build();
+    }
+
+    private Response handleRemoveTagsFromResource(MultivaluedMap<String, String> params) {
+        service.removeTagsFromResource(params.getFirst("ResourceName"), tagKeys(params));
+        return Response.ok(AwsQueryResponse.envelope("RemoveTagsFromResource",
+                AwsNamespaces.RDS, "")).build();
+    }
+
+    /** Every spelling the SDKs and the CLI use for a tag list, as RdsQueryHandler reads them. */
+    private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (String prefix : List.of("Tags.member", "Tags.Tag", "Tag")) {
+            for (int i = 1; ; i++) {
+                String key = params.getFirst(prefix + "." + i + ".Key");
+                if (key == null) {
+                    break;
+                }
+                // A key given without a value is stored as an empty value, as AWS stores it —
+                // a null would also break the immutable copy the read hands back.
+                String value = params.getFirst(prefix + "." + i + ".Value");
+                tags.put(key, value == null ? "" : value);
+            }
+        }
+        return tags;
+    }
+
+    private static List<String> tagKeys(MultivaluedMap<String, String> params) {
+        List<String> keys = new ArrayList<>();
+        for (String prefix : List.of("TagKeys.member", "TagKeys.TagKey", "TagKeys")) {
+            for (int i = 1; ; i++) {
+                String key = params.getFirst(prefix + "." + i);
+                if (key == null) {
+                    break;
+                }
+                keys.add(key);
+            }
+        }
+        return keys;
     }
 }
