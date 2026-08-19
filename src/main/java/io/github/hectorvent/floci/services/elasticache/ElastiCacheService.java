@@ -409,7 +409,9 @@ public class ElastiCacheService {
             throw new AwsException("InvalidParameterValue",
                     "The parameter SubnetIds must be provided.", 400);
         }
-        String region = regionResolver.getDefaultRegion();
+        // The caller's region, not the configured default: subnets exist in the region they were
+        // created in, and the ARN this group is reported under is built from that same region.
+        String region = regionResolver.getRegion();
         List<Subnet> resolved = ec2Service.describeSubnets(region, subnetIds, Map.of());
         if (resolved.size() != subnetIds.size()) {
             throw new AwsException("InvalidParameterValue",

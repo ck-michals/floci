@@ -24,7 +24,7 @@ class ElastiCacheSubnetGroupIntegrationTest {
     private static final String EC_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260412/us-east-1/elasticache/aws4_request";
     private static final String EC2_AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20260412/us-east-1/ec2/aws4_request";
+            "AWS4-HMAC-SHA256 Credential=test/20260412/%s/ec2/aws4_request";
 
     private static String firstSubnet;
     private static String secondSubnet;
@@ -36,8 +36,8 @@ class ElastiCacheSubnetGroupIntegrationTest {
                 .formParam("Version", "2015-02-02");
     }
 
-    private static String ec2(String action, String... formParams) {
-        var request = given().header("Authorization", EC2_AUTH)
+    private static String ec2(String region, String action, String... formParams) {
+        var request = given().header("Authorization", EC2_AUTH.formatted(region))
                 .formParam("Action", action)
                 .formParam("Version", "2016-11-15");
         for (int i = 0; i < formParams.length; i += 2) {
@@ -54,10 +54,10 @@ class ElastiCacheSubnetGroupIntegrationTest {
     @Test
     @Order(1)
     void createSubnetsToPlaceTheGroupIn() {
-        vpcId = between(ec2("CreateVpc", "CidrBlock", "10.20.0.0/16"), "vpcId");
-        firstSubnet = between(ec2("CreateSubnet", "VpcId", vpcId, "CidrBlock", "10.20.1.0/24",
+        vpcId = between(ec2("us-east-1", "CreateVpc", "CidrBlock", "10.20.0.0/16"), "vpcId");
+        firstSubnet = between(ec2("us-east-1", "CreateSubnet", "VpcId", vpcId, "CidrBlock", "10.20.1.0/24",
                 "AvailabilityZone", "us-east-1a"), "subnetId");
-        secondSubnet = between(ec2("CreateSubnet", "VpcId", vpcId, "CidrBlock", "10.20.2.0/24",
+        secondSubnet = between(ec2("us-east-1", "CreateSubnet", "VpcId", vpcId, "CidrBlock", "10.20.2.0/24",
                 "AvailabilityZone", "us-east-1b"), "subnetId");
     }
 
@@ -96,8 +96,8 @@ class ElastiCacheSubnetGroupIntegrationTest {
     @Test
     @Order(3)
     void subnetsFromTwoVpcsAreRejected() {
-        String otherVpc = between(ec2("CreateVpc", "CidrBlock", "10.21.0.0/16"), "vpcId");
-        String otherSubnet = between(ec2("CreateSubnet", "VpcId", otherVpc, "CidrBlock", "10.21.1.0/24",
+        String otherVpc = between(ec2("us-east-1", "CreateVpc", "CidrBlock", "10.21.0.0/16"), "vpcId");
+        String otherSubnet = between(ec2("us-east-1", "CreateSubnet", "VpcId", otherVpc, "CidrBlock", "10.21.1.0/24",
                 "AvailabilityZone", "us-east-1a"), "subnetId");
 
         elasticache("CreateCacheSubnetGroup")
@@ -203,6 +203,31 @@ class ElastiCacheSubnetGroupIntegrationTest {
         elasticache("DeleteCacheSubnetGroup")
                 .formParam("CacheSubnetGroupName", "tagged-sng")
         .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    @Order(4)
+    void subnetsAreResolvedInTheCallersRegion() {
+        // Subnets exist in the region they were created in. Resolving against the configured
+        // default region instead would reject these as invalid, and would report the group under
+        // an eu-west-1 ARN built from subnets read somewhere else.
+        String euVpc = between(ec2("eu-west-1", "CreateVpc", "CidrBlock", "10.30.0.0/16"), "vpcId");
+        String euSubnet = between(ec2("eu-west-1", "CreateSubnet", "VpcId", euVpc,
+                "CidrBlock", "10.30.1.0/24", "AvailabilityZone", "eu-west-1a"), "subnetId");
+
+        given().header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=test/20260412/eu-west-1/elasticache/aws4_request")
+                .formParam("Action", "CreateCacheSubnetGroup")
+                .formParam("Version", "2015-02-02")
+                .formParam("CacheSubnetGroupName", "eu-west-sng")
+                .formParam("CacheSubnetGroupDescription", "other region")
+                .formParam("SubnetIds.SubnetIdentifier.1", euSubnet)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<VpcId>" + euVpc + "</VpcId>"))
+            .body(containsString("<Name>eu-west-1a</Name>"))
+            .body(containsString("arn:aws:elasticache:eu-west-1:"));
     }
 
     @Test
