@@ -325,18 +325,13 @@ public class AwsQueryController {
      *
      * <p>The tag actions carry no engine or identifier to route on — only the ARN of the resource
      * they address — so without reading it they reach the RDS handler, which does not hold
-     * DocumentDB's records. An ARN naming something DocumentDB does not have stays with RDS.
+     * DocumentDB's records. The whole ARN is matched, not its trailing name: RDS and DocumentDB
+     * share one ARN space, so a name both services use would otherwise be answered from the wrong
+     * store, and an RDS parameter group or option group could be resolved as a cluster. Anything
+     * DocumentDB does not hold under that exact ARN stays with RDS.
      */
     private boolean namesDocDbResource(String resourceName) {
-        if (resourceName == null || !resourceName.startsWith("arn:")) {
-            return false;
-        }
-        int lastSeparator = resourceName.lastIndexOf(':');
-        if (lastSeparator < 0 || lastSeparator == resourceName.length() - 1) {
-            return false;
-        }
-        String identifier = resourceName.substring(lastSeparator + 1);
-        return docDbService.hasCluster(identifier) || docDbService.hasInstance(identifier);
+        return docDbService.hasResourceWithArn(resourceName);
     }
 
     private Response handleCognitoQuery(String action, MultivaluedMap<String, String> formParams, String region) {

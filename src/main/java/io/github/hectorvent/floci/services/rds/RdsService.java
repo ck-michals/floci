@@ -4230,8 +4230,19 @@ public class RdsService implements Resettable {
             }
         }
         resolved.ifPresent(group -> {
-            if (group.getRegion() == null || group.getRegion().isBlank()) {
-                group.setRegion(effectiveRegion);
+            // A group persisted before either field existed reads back without them. The ARN is
+            // what a caller tags by, so a group that never gets one cannot be tagged at all.
+            boolean regionMissing = group.getRegion() == null || group.getRegion().isBlank();
+            boolean arnMissing = group.getDbParameterGroupArn() == null
+                    || group.getDbParameterGroupArn().isBlank();
+            if (regionMissing || arnMissing) {
+                if (regionMissing) {
+                    group.setRegion(effectiveRegion);
+                }
+                if (arnMissing) {
+                    group.setDbParameterGroupArn(
+                            regionResolver.buildArn("rds", group.getRegion(), "pg:" + groupName));
+                }
                 putParameterGroupForRegion(groupName, effectiveRegion, group);
             }
         });
@@ -4303,8 +4314,17 @@ public class RdsService implements Resettable {
             }
         }
         resolved.ifPresent(group -> {
-            if (group.getRegion() == null || group.getRegion().isBlank()) {
-                group.setRegion(effectiveRegion);
+            boolean regionMissing = group.getRegion() == null || group.getRegion().isBlank();
+            boolean arnMissing = group.getDbClusterParameterGroupArn() == null
+                    || group.getDbClusterParameterGroupArn().isBlank();
+            if (regionMissing || arnMissing) {
+                if (regionMissing) {
+                    group.setRegion(effectiveRegion);
+                }
+                if (arnMissing) {
+                    group.setDbClusterParameterGroupArn(regionResolver.buildArn(
+                            "rds", group.getRegion(), "cluster-pg:" + groupName));
+                }
                 putClusterParameterGroupForRegion(groupName, effectiveRegion, group);
             }
         });
