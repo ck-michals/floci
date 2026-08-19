@@ -322,8 +322,8 @@ public class AwsQueryController {
                 }
 
                 if ("docdb".equalsIgnoreCase(engine)
-                       || docDbService.hasCluster(clusterId)
-                       || docDbService.hasInstance(instanceId)
+                       || docDbService.hasCluster(clusterId, region)
+                       || docDbService.hasInstance(instanceId, region)
                        || namesDocDbResource(formParams.getFirst("ResourceName"), region)) {
                         yield docDbQueryHandler.handle(action, formParams);
                 }

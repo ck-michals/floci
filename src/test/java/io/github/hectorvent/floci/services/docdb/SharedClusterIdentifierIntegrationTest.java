@@ -12,6 +12,7 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -225,5 +226,56 @@ class SharedClusterIdentifierIntegrationTest {
                 .formParam("DBClusterIdentifier", id)
                 .formParam("SkipFinalSnapshot", "true")
         .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    void anRdsRequestIsNotAnsweredByADocumentDbClusterInAnotherRegion() {
+        // DocumentDB records are keyed by identifier alone, so the region has to be read from the
+        // record. Otherwise a name DocumentDB holds in one region is taken away from RDS in every
+        // other region: the create is refused as existing, and describes answer the wrong record.
+        String id = "region-routing-clash";
+
+        queryIn("eu-west-1", "CreateDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", "docdb")
+                .formParam("MasterUsername", "docdbadmin")
+                .formParam("MasterUserPassword", "secret99password")
+        .when().post("/")
+        .then().statusCode(200);
+
+        // Same name, different region, ordinary RDS engine: RDS has to answer this.
+        queryIn("us-east-1", "CreateDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", "aurora-postgresql")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "secret99password")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            // Floci reports the aurora-postgresql request as its postgres engine; what matters
+            // here is that RDS answered at all rather than DocumentDB refusing it as existing.
+            .body(containsString("<Engine>postgres</Engine>"));
+
+        // And each region's describe answers from the service that owns the record there.
+        queryIn("us-east-1", "DescribeDBClusters")
+                .formParam("DBClusterIdentifier", id)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Engine>postgres</Engine>"))
+            .body(not(containsString("docdb")));
+
+        queryIn("eu-west-1", "DescribeDBClusters")
+                .formParam("DBClusterIdentifier", id)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("docdb"));
+
+        queryIn("eu-west-1", "DeleteDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("SkipFinalSnapshot", "true")
+        .when().post("/").then().statusCode(200);
+        rdsService.deleteDbCluster(id, "us-east-1");
     }
 }

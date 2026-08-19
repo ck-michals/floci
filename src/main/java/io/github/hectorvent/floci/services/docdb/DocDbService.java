@@ -127,10 +127,27 @@ public class DocDbService {
     }
 
     public boolean hasCluster(String id) {
+        return hasCluster(id, regionResolver.getRegion());
+    }
+
+    /**
+     * Whether DocumentDB holds this cluster <em>in this region</em>.
+     *
+     * <p>The records are keyed by identifier alone, so the region has to come from the one place
+     * that carries it — the stored ARN. Without that, an RDS request naming a cluster DocumentDB
+     * holds somewhere else is answered from here, and a name RDS is free to reuse in another
+     * region stops being usable.
+     */
+    public boolean hasCluster(String id, String region) {
         if (id == null || id.isBlank()) {
             return false;
         }
-        return clusters.get(id).isPresent();
+        return clusters.get(id).filter(c -> regionOf(c.getDbClusterArn()).equals(region)).isPresent();
+    }
+
+    /** The region a record was created in, taken from its ARN; older records carry the default. */
+    private String regionOf(String arn) {
+        return AwsArnUtils.regionOrDefault(arn, regionResolver.getDefaultRegion());
     }
 
     /**
@@ -152,10 +169,14 @@ public class DocDbService {
     }
 
     public boolean hasInstance(String id) {
+        return hasInstance(id, regionResolver.getRegion());
+    }
+
+    public boolean hasInstance(String id, String region) {
         if (id == null || id.isBlank()) {
             return false;
         }
-        return instances.get(id).isPresent();
+        return instances.get(id).filter(i -> regionOf(i.getDbInstanceArn()).equals(region)).isPresent();
     }
 
     public Collection<DocDbCluster> listDbClusters(String filterId) {
