@@ -278,4 +278,39 @@ class SharedClusterIdentifierIntegrationTest {
         .when().post("/").then().statusCode(200);
         rdsService.deleteDbCluster(id, "us-east-1");
     }
+
+    @Test
+    void theDocDbScopeIsCheckedTheSameWayAsTheRdsScope() {
+        // DocumentDB is reachable under either credential scope. A create signed for the docdb
+        // scope dispatches straight to its handler, which only knows its own store — so without
+        // the same check there, this is the way to put two records under one ARN.
+        String id = "docdb-scope-clash";
+        rdsService.createDbCluster(id, "aurora-postgresql", null, "admin", "secret99password",
+                null, false, null);
+
+        given().header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=test/20260615/us-east-1/docdb/aws4_request, "
+                        + "SignedHeaders=content-type;host, Signature=test")
+                .contentType(URLENC)
+                .formParam("Action", "CreateDBCluster")
+                .formParam("Version", "2014-10-31")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", "docdb")
+                .formParam("MasterUsername", "docdbadmin")
+                .formParam("MasterUserPassword", "secret99password")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("DBClusterAlreadyExistsFault"));
+
+        // The RDS record is still the only one under that ARN, and still RDS's.
+        query("DescribeDBClusters")
+                .formParam("DBClusterIdentifier", id)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Engine>postgres</Engine>"));
+
+        rdsService.deleteDbCluster(id, "us-east-1");
+    }
 }

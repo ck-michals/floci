@@ -298,21 +298,9 @@ public class AwsQueryController {
                 String clusterId = formParams.getFirst("DBClusterIdentifier");
                 String instanceId = formParams.getFirst("DBInstanceIdentifier");
 
-                // One identifier space covers the whole RDS family: a live account refuses to
-                // create an Aurora cluster named like an existing DocumentDB one. Sending a create
-                // to whoever already holds the identifier is what answers AlreadyExists — and it
-                // stops two services holding one identifier, which no ARN could then tell apart.
-                // Only the identifier being created is checked: CreateDBInstance names the parent
-                // cluster too, and that one existing in RDS is the normal case, not a clash.
-                if ("CreateDBCluster".equals(action)
-                        && rdsService.hasClusterOrInstance(clusterId, null, region)) {
-                    yield xmlErrorResponse("DBClusterAlreadyExistsFault",
-                            "DB Cluster already exists", 400);
-                }
-                if ("CreateDBInstance".equals(action)
-                        && rdsService.hasClusterOrInstance(null, instanceId, region)) {
-                    yield xmlErrorResponse("DBInstanceAlreadyExists",
-                            "DB Instance already exists", 400);
+                Response identifierClash = rdsAlreadyHoldsIdentifier(action, formParams, region);
+                if (identifierClash != null) {
+                    yield identifierClash;
                 }
 
                 if ("neptune".equalsIgnoreCase(engine)
@@ -330,7 +318,12 @@ public class AwsQueryController {
                 yield rdsQueryHandler.handle(action, formParams, region);
             }
             case "neptune" -> neptuneQueryHandler.handle(action, formParams);
-            case "docdb" -> docDbQueryHandler.handle(action, formParams);
+            case "docdb" -> {
+                // The same check as on the rds scope: DocumentDB is reachable under either, and a
+                // create that skipped it here would put a second record under an ARN RDS owns.
+                Response clash = rdsAlreadyHoldsIdentifier(action, formParams, region);
+                yield clash != null ? clash : docDbQueryHandler.handle(action, formParams);
+            }
             case "email" -> sesQueryHandler.handle(action, formParams, region);
             case "monitoring" -> cloudWatchMetricsQueryHandler.handle(action, formParams, region);
             case "cloudformation" -> cloudFormationQueryHandler.handle(action, formParams, region);
@@ -342,6 +335,31 @@ public class AwsQueryController {
             default -> xmlErrorResponse("UnknownService",
                     "Unknown or unsupported service: " + service, 400);
         };
+    }
+
+    /**
+     * The AlreadyExists answer when a create names an identifier RDS already holds here, or null.
+     *
+     * <p>One identifier space covers the whole RDS family: a live account refuses to create an
+     * Aurora cluster named like an existing DocumentDB one. Answering that way is what stops two
+     * services holding one identifier in one region, which no ARN could then tell apart — so the
+     * check has to run on every route that reaches DocumentDB, not only the {@code rds} scope.
+     *
+     * <p>Only the identifier being created is checked: {@code CreateDBInstance} names its parent
+     * cluster too, and that cluster existing in RDS is the normal case rather than a clash.
+     */
+    private Response rdsAlreadyHoldsIdentifier(String action,
+                                               MultivaluedMap<String, String> formParams,
+                                               String region) {
+        if ("CreateDBCluster".equals(action) && rdsService.hasClusterOrInstance(
+                formParams.getFirst("DBClusterIdentifier"), null, region)) {
+            return xmlErrorResponse("DBClusterAlreadyExistsFault", "DB Cluster already exists", 400);
+        }
+        if ("CreateDBInstance".equals(action) && rdsService.hasClusterOrInstance(
+                null, formParams.getFirst("DBInstanceIdentifier"), region)) {
+            return xmlErrorResponse("DBInstanceAlreadyExists", "DB Instance already exists", 400);
+        }
+        return null;
     }
 
     /**
