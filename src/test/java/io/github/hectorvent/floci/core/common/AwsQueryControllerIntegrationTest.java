@@ -24,6 +24,23 @@ class AwsQueryControllerIntegrationTest {
     }
 
     @Test
+    void globalClusterActionFallbackWithoutAuthorizationHeader() {
+        // Without a credential scope the service is inferred from the action. An action the RDS
+        // handler serves but the inference list does not name is dispatched to SQS, which answers
+        // UnsupportedOperation for it.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeGlobalClusters")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeGlobalClustersResponse.DescribeGlobalClustersResult.GlobalClusters",
+                    equalTo(""));
+    }
+
+    @Test
     void ec2ActionFallbackWithoutAuthorizationHeader() {
         given()
             .contentType("application/x-www-form-urlencoded")
