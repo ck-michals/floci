@@ -77,7 +77,12 @@ class ElastiCacheSubnetGroupIntegrationTest {
             .body(containsString("<SubnetIdentifier>" + firstSubnet + "</SubnetIdentifier>"))
             .body(containsString("<Name>us-east-1a</Name>"))
             .body(containsString("<Name>us-east-1b</Name>"))
-            .body(containsString(":subnetgroup:" + GROUP + "</ARN>"));
+            .body(containsString(":subnetgroup:" + GROUP + "</ARN>"))
+            // In the order they were given: the subnets are read back from a store whose scan
+            // order is its own, so the group would otherwise report them in an arbitrary order.
+            .body(org.hamcrest.Matchers.matchesPattern(
+                    "(?s).*<SubnetIdentifier>" + firstSubnet + "</SubnetIdentifier>.*"
+                            + "<SubnetIdentifier>" + secondSubnet + "</SubnetIdentifier>.*"));
     }
 
     @Test

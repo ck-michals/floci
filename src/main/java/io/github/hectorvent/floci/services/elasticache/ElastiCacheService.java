@@ -428,8 +428,12 @@ public class ElastiCacheService {
                     + " and " + foreign.getFirst() + " are not in the same VPC.", 400);
         }
 
+        // In the order the caller gave them: describeSubnets answers in the store's scan order,
+        // which would make the reported order of a group's subnets arbitrary between calls.
+        Map<String, String> zoneBySubnet = new LinkedHashMap<>();
+        resolved.forEach(subnet -> zoneBySubnet.put(subnet.getSubnetId(), subnet.getAvailabilityZone()));
         Map<String, String> availabilityZones = new LinkedHashMap<>();
-        resolved.forEach(subnet -> availabilityZones.put(subnet.getSubnetId(), subnet.getAvailabilityZone()));
+        subnetIds.forEach(id -> availabilityZones.put(id, zoneBySubnet.get(id)));
         return new CacheSubnetGroup(name, description, vpcId, availabilityZones);
     }
 

@@ -115,3 +115,25 @@ teardown() {
     run aws_cmd elasticache delete-cache-subnet-group --cache-subnet-group-name "$SNG"
     assert_success
 }
+
+@test "ElastiCache: a cache subnet group is built from subnets in the caller's region" {
+    # Subnets exist in the region they were created in. Resolving them in the configured default
+    # region instead rejects a caller's own subnets as invalid.
+    export AWS_DEFAULT_REGION=eu-west-1
+    vpc=$(aws_cmd ec2 create-vpc --cidr-block 10.31.0.0/16 --query 'Vpc.VpcId' --output text)
+    s=$(aws_cmd ec2 create-subnet --vpc-id "$vpc" --cidr-block 10.31.1.0/24 \
+        --availability-zone eu-west-1a --query 'Subnet.SubnetId' --output text)
+    SNG_EU="bats-sng-eu-$(unique_name)"
+
+    run aws_cmd elasticache create-cache-subnet-group \
+        --cache-subnet-group-name "$SNG_EU" \
+        --cache-subnet-group-description "bats other region" \
+        --subnet-ids "$s"
+    assert_success
+    [ "$(json_get "$output" '.CacheSubnetGroup.VpcId')" = "$vpc" ]
+    [ "$(json_get "$output" '.CacheSubnetGroup.Subnets[0].SubnetAvailabilityZone.Name')" = "eu-west-1a" ]
+    [[ "$(json_get "$output" '.CacheSubnetGroup.ARN')" == arn:aws:elasticache:eu-west-1:* ]]
+
+    run aws_cmd elasticache delete-cache-subnet-group --cache-subnet-group-name "$SNG_EU"
+    assert_success
+}
