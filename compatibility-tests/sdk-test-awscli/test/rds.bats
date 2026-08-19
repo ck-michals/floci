@@ -145,3 +145,20 @@ teardown() {
     assert_failure
     assert_output --partial "GlobalClusterNotFoundFault"
 }
+
+@test "RDS: cluster parameter group reports its ARN and carries tags" {
+    CPG="bats-cpg-$(unique_name)"
+    run aws_cmd rds create-db-cluster-parameter-group --db-cluster-parameter-group-name "$CPG" \
+        --db-parameter-group-family aurora-postgresql15 --description "bats" \
+        --tags Key=team,Value=data
+    assert_success
+    arn=$(json_get "$output" '.DBClusterParameterGroup.DBClusterParameterGroupArn')
+    [ -n "$arn" ]
+    [[ "$arn" == *":cluster-pg:$CPG" ]]
+
+    run aws_cmd rds list-tags-for-resource --resource-name "$arn"
+    assert_success
+    assert_output --partial '"Key": "team"'
+
+    aws_cmd rds delete-db-cluster-parameter-group --db-cluster-parameter-group-name "$CPG" >/dev/null 2>&1 || true
+}
