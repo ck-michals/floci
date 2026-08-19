@@ -145,23 +145,48 @@ class SharedClusterIdentifierIntegrationTest {
     }
 
     @Test
-    void aCreateInAnotherRegionCannotTakeAnIdentifierRdsHolds() {
-        // DocumentDB keys records by bare identifier, so signing the create for another region
-        // does not make it a different record — it would shadow the RDS one everywhere.
+    void anotherRegionIsAnotherResource() {
+        // RDS scopes these names by region, so the same name elsewhere is a different resource —
+        // the SDK compatibility suite pins that for instances. Since each ARN carries the region
+        // it was created in, the two never share one ARN and no tag call has to choose.
         String id = "cross-region-identifier";
         rdsService.createDbCluster(id, "aurora-postgresql", null, "admin", "secret99password",
                 null, false, null);
 
-        queryIn("eu-west-1", "CreateDBCluster")
+        String docDbArn = queryIn("eu-west-1", "CreateDBCluster")
                 .formParam("DBClusterIdentifier", id)
                 .formParam("Engine", "docdb")
                 .formParam("MasterUsername", "docdbadmin")
                 .formParam("MasterUserPassword", "secret99password")
         .when().post("/")
-        .then()
-            .statusCode(400)
-            .body(containsString("AlreadyExists"));
+        .then().statusCode(200)
+        .extract().path("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.DBClusterArn");
 
+        assertEquals("arn:aws:rds:eu-west-1:000000000000:cluster:" + id, docDbArn);
+        assertEquals("arn:aws:rds:us-east-1:000000000000:cluster:" + id,
+                rdsService.getDbCluster(id, "us-east-1").getDbClusterArn());
+
+        // Each ARN answers from its own service, so tagging one leaves the other alone.
+        queryIn("eu-west-1", "AddTagsToResource")
+                .formParam("ResourceName", docDbArn)
+                .formParam("Tags.Tag.1.Key", "owner")
+                .formParam("Tags.Tag.1.Value", "docdb")
+        .when().post("/")
+        .then().statusCode(200);
+
+        // Read back over the endpoint: the service checks the ARN against the caller's region, and
+        // a direct call from the test thread has no request to take one from.
+        queryIn("eu-west-1", "ListTagsForResource")
+                .formParam("ResourceName", docDbArn)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Value>docdb</Value>"));
+
+        assertTrue(rdsService.listTagsForResource(
+                "arn:aws:rds:us-east-1:000000000000:cluster:" + id, "us-east-1").isEmpty());
+
+        docDbService.deleteDbCluster(id);
         rdsService.deleteDbCluster(id, "us-east-1");
     }
 

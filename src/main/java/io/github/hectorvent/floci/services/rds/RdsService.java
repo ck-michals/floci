@@ -1176,16 +1176,15 @@ public class RdsService implements Resettable {
      * names.
      */
     public boolean hasClusterOrInstance(String clusterId, String instanceId, String region) {
-        // Any region, not only the request's: DocumentDB keys its records by bare identifier, so
-        // one name there shadows that name in RDS wherever RDS holds it. Refusing the create is a
-        // narrower answer than AWS gives — it allows one name per region — but Floci cannot hold
-        // both and answer either correctly.
+        // The request's region, and only it: RDS scopes these names by region — the same name in
+        // two regions is two resources, which the SDK compatibility suite pins — and two records
+        // in different regions carry different ARNs, so there is nothing for a tag call to
+        // confuse. What must not exist is one identifier in both services in one region.
+        String effectiveRegion = effectiveRegion(region);
         boolean cluster = clusterId != null && !clusterId.isBlank()
-                && clusters.scan(k -> true).stream()
-                        .anyMatch(c -> clusterId.equalsIgnoreCase(c.getDbClusterIdentifier()));
+                && findClusterForScope(currentAccountId(), effectiveRegion, clusterId) != null;
         boolean instance = instanceId != null && !instanceId.isBlank()
-                && instances.scan(k -> true).stream()
-                        .anyMatch(i -> instanceId.equalsIgnoreCase(i.getDbInstanceIdentifier()));
+                && findInstanceForScope(currentAccountId(), effectiveRegion, instanceId) != null;
         return cluster || instance;
     }
 
