@@ -372,7 +372,12 @@ public class AwsQueryController {
             "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters",
             "DescribeDBProxies", "CreateDBProxy", "ModifyDBProxy", "DeleteDBProxy",
             "RegisterDBProxyTargets", "DeregisterDBProxyTargets",
-            "DescribeDBProxyTargetGroups", "ModifyDBProxyTargetGroup", "DescribeDBProxyTargets"
+            "DescribeDBProxyTargetGroups", "ModifyDBProxyTargetGroup", "DescribeDBProxyTargets",
+            "CreateDBClusterParameterGroup", "DescribeDBClusterParameterGroups",
+            "ModifyDBClusterParameterGroup", "DeleteDBClusterParameterGroup",
+            "DescribeDBClusterParameters",
+            "CreateOptionGroup", "DescribeOptionGroups", "ModifyOptionGroup", "DeleteOptionGroup",
+            "DescribeDBSnapshots", "DescribeDBClusterSnapshots"
     );
 
     private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(
