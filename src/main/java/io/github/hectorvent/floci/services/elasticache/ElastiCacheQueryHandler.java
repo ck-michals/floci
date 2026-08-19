@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.CacheParameterGroup;
+import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
@@ -65,7 +66,10 @@ public class ElastiCacheQueryHandler {
             case "CreateCacheCluster"         -> handleCreateCacheCluster(params);
             case "DescribeCacheClusters"      -> handleDescribeCacheClusters(params);
             case "DeleteCacheCluster"         -> handleDeleteCacheCluster(params);
+            case "CreateCacheSubnetGroup"     -> handleCreateCacheSubnetGroup(params);
             case "DescribeCacheSubnetGroups"  -> handleDescribeCacheSubnetGroups(params);
+            case "ModifyCacheSubnetGroup"     -> handleModifyCacheSubnetGroup(params);
+            case "DeleteCacheSubnetGroup"     -> handleDeleteCacheSubnetGroup(params);
             case "CreateCacheParameterGroup" -> handleCreateCacheParameterGroup(params);
             case "DescribeCacheParameterGroups" -> handleDescribeCacheParameterGroups(params);
             case "ModifyCacheParameterGroup" -> handleModifyCacheParameterGroup(params);
@@ -293,14 +297,92 @@ public class ElastiCacheQueryHandler {
 
     // ── Subnet / Parameter Groups (read-only describes for resources not modeled) ────
 
-    private Response handleDescribeCacheSubnetGroups(MultivaluedMap<String, String> params) {
-        // Cache subnet groups are not modeled by the emulator; return the wire-accurate
-        // empty result so SDK clients get a valid 200 instead of an unsupported-action 400.
-        var xml = new XmlBuilder().start("CacheSubnetGroups").end("CacheSubnetGroups");
-        return Response.ok(AwsQueryResponse.envelope("DescribeCacheSubnetGroups", AwsNamespaces.EC, xml.build())).build();
+    private Response handleCreateCacheSubnetGroup(MultivaluedMap<String, String> params) {
+        try {
+            CacheSubnetGroup group = service.createCacheSubnetGroup(
+                    params.getFirst("CacheSubnetGroupName"),
+                    params.getFirst("CacheSubnetGroupDescription"),
+                    parseSubnetIds(params),
+                    parseTags(params));
+            var xml = new XmlBuilder();
+            appendSubnetGroup(xml, group);
+            return Response.ok(AwsQueryResponse.envelope("CreateCacheSubnetGroup", AwsNamespaces.EC, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
     }
 
-    private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> params) {
+    private Response handleDescribeCacheSubnetGroups(MultivaluedMap<String, String> params) {
+        try {
+            List<CacheSubnetGroup> groups =
+                    service.describeCacheSubnetGroups(params.getFirst("CacheSubnetGroupName"));
+            var xml = new XmlBuilder().start("CacheSubnetGroups");
+            groups.forEach(group -> appendSubnetGroup(xml, group));
+            xml.end("CacheSubnetGroups");
+            return Response.ok(AwsQueryResponse.envelope("DescribeCacheSubnetGroups", AwsNamespaces.EC, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleModifyCacheSubnetGroup(MultivaluedMap<String, String> params) {
+        try {
+            CacheSubnetGroup group = service.modifyCacheSubnetGroup(
+                    params.getFirst("CacheSubnetGroupName"),
+                    params.getFirst("CacheSubnetGroupDescription"),
+                    parseSubnetIds(params));
+            var xml = new XmlBuilder();
+            appendSubnetGroup(xml, group);
+            return Response.ok(AwsQueryResponse.envelope("ModifyCacheSubnetGroup", AwsNamespaces.EC, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDeleteCacheSubnetGroup(MultivaluedMap<String, String> params) {
+        try {
+            service.deleteCacheSubnetGroup(params.getFirst("CacheSubnetGroupName"));
+            return Response.ok(AwsQueryResponse.envelope("DeleteCacheSubnetGroup", AwsNamespaces.EC, "")).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private void appendSubnetGroup(XmlBuilder xml, CacheSubnetGroup group) {
+        xml.start("CacheSubnetGroup")
+                .elem("CacheSubnetGroupName", group.getName())
+                .elem("CacheSubnetGroupDescription", group.getDescription())
+                .elem("VpcId", group.getVpcId())
+                .start("Subnets");
+        group.getSubnetAvailabilityZones().forEach((subnetId, availabilityZone) -> xml
+                .start("Subnet")
+                .elem("SubnetIdentifier", subnetId)
+                .start("SubnetAvailabilityZone").elem("Name", availabilityZone).end("SubnetAvailabilityZone")
+                .start("SupportedNetworkTypes").elem("member", "ipv4").end("SupportedNetworkTypes")
+                .end("Subnet"));
+        xml.end("Subnets")
+                .start("SupportedNetworkTypes").elem("member", "ipv4").end("SupportedNetworkTypes")
+                .elem("ARN", "arn:aws:elasticache:" + regionResolver.getRegion() + ":"
+                        + regionResolver.getAccountId() + ":subnetgroup:" + group.getName())
+                .end("CacheSubnetGroup");
+    }
+
+    /** Reads the SubnetIds list under every spelling the Query protocol sends it in. */
+    private static List<String> parseSubnetIds(MultivaluedMap<String, String> params) {
+        List<String> subnetIds = new ArrayList<>();
+        for (String prefix : List.of("SubnetIds.SubnetIdentifier", "SubnetIds.member")) {
+            for (int i = 1; ; i++) {
+                String subnetId = params.getFirst(prefix + "." + i);
+                if (subnetId == null) {
+                    break;
+                }
+                subnetIds.add(subnetId);
+            }
+        }
+        return subnetIds;
+    }
+
+private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> params) {
         try {
             CacheParameterGroup group = service.createCacheParameterGroup(
                     params.getFirst("CacheParameterGroupName"),
@@ -396,6 +478,9 @@ public class ElastiCacheQueryHandler {
             }
 
             Map<String, String> tags = Map.of();
+            if ("subnetgroup".equals(arn[5])) {
+                tags = service.describeCacheSubnetGroups(arn[6]).getFirst().getTags();
+            }
             if ("parametergroup".equals(arn[5])) {
                 tags = service.findParameterGroup(arn[6])
                         .orElseThrow(() -> new AwsException("CacheParameterGroupNotFound",

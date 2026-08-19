@@ -23,7 +23,10 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `CreateCacheCluster` | - |
 | `DescribeCacheClusters` | - |
 | `DeleteCacheCluster` | - |
-| `DescribeCacheSubnetGroups` | - |
+| `CreateCacheSubnetGroup` | Create a cache subnet group |
+| `DescribeCacheSubnetGroups` | List cache subnet groups |
+| `ModifyCacheSubnetGroup` | Replace a group's description or subnets |
+| `DeleteCacheSubnetGroup` | Delete a cache subnet group |
 | `CreateCacheParameterGroup` | Create a cache parameter group |
 | `DescribeCacheParameterGroups` | List parameter groups, including the AWS defaults |
 | `ModifyCacheParameterGroup` | Set parameters on a group |
@@ -31,6 +34,12 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `DeleteCacheParameterGroup` | Delete a cache parameter group |
 | `ListTagsForResource` | Tags on a parameter group ARN |
 <!-- floci:actions:end -->
+
+### Cache Subnet Groups
+
+A subnet group's VPC and each subnet's availability zone are read from the subnets themselves, as
+AWS reads them, so the subnets have to exist in the emulator's EC2 first. Subnets that are unknown,
+or that span more than one VPC, are refused the way AWS refuses them.
 
 ### Cache Parameter Groups
 
