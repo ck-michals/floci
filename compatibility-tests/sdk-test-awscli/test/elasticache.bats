@@ -84,3 +84,34 @@ teardown() {
     assert_failure
     assert_output --partial "not a valid identifier"
 }
+
+@test "ElastiCache: cache subnet group takes its VPC and zones from the subnets" {
+    vpc=$(aws_cmd ec2 create-vpc --cidr-block 10.30.0.0/16 --query 'Vpc.VpcId' --output text)
+    a=$(aws_cmd ec2 create-subnet --vpc-id "$vpc" --cidr-block 10.30.1.0/24 \
+        --availability-zone us-east-1a --query 'Subnet.SubnetId' --output text)
+    b=$(aws_cmd ec2 create-subnet --vpc-id "$vpc" --cidr-block 10.30.2.0/24 \
+        --availability-zone us-east-1b --query 'Subnet.SubnetId' --output text)
+    SNG="bats-sng-$(unique_name)"
+
+    run aws_cmd elasticache create-cache-subnet-group \
+        --cache-subnet-group-name "$SNG" \
+        --cache-subnet-group-description "bats subnet group" \
+        --subnet-ids "$a" "$b"
+    assert_success
+    [ "$(json_get "$output" '.CacheSubnetGroup.VpcId')" = "$vpc" ]
+    [ "$(json_get "$output" '.CacheSubnetGroup.Subnets | length')" = "2" ]
+    [ "$(json_get "$output" '.CacheSubnetGroup.Subnets[0].SubnetAvailabilityZone.Name')" = "us-east-1a" ]
+
+    run aws_cmd elasticache describe-cache-subnet-groups --cache-subnet-group-name "$SNG"
+    assert_success
+    [ "$(json_get "$output" '.CacheSubnetGroups[0].CacheSubnetGroupName')" = "$SNG" ]
+
+    run aws_cmd elasticache create-cache-subnet-group \
+        --cache-subnet-group-name "bats-absent-$(unique_name)" \
+        --cache-subnet-group-description x --subnet-ids subnet-00000000000000000
+    assert_failure
+    assert_output --partial "are invalid"
+
+    run aws_cmd elasticache delete-cache-subnet-group --cache-subnet-group-name "$SNG"
+    assert_success
+}
