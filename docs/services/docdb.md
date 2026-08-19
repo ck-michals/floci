@@ -29,6 +29,9 @@ The management API shares the RDS Query endpoint (`POST /` with an `Action=` par
 | `DescribeDBInstances` | List instances |
 | `DeleteDBInstance` | Remove an instance from a cluster |
 | `ModifyDBInstance` | Update instance class or IAM auth setting |
+| `ListTagsForResource` | List a cluster's or instance's tags |
+| `AddTagsToResource` | Add or overwrite tags on a cluster or instance |
+| `RemoveTagsFromResource` | Remove tags by key from a cluster or instance |
 <!-- floci:actions:end -->
 
 ## Configuration
