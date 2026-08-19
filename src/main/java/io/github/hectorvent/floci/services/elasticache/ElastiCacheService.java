@@ -447,7 +447,7 @@ public class ElastiCacheService {
                             "The parameter group " + name + " is a default group and cannot be modified.", 400);
                 }
                 throw new AwsException("CacheParameterGroupNotFound",
-                        "CacheParameterGroup " + name + " not found.", 404);
+                        "CacheParameterGroup not found: " + name, 404);
             }
             Map<String, String> updated = new LinkedHashMap<>(group.getParameters());
             updated.putAll(parameters);
@@ -461,6 +461,10 @@ public class ElastiCacheService {
         validateParameterGroupName(name);
         synchronized (lockFor(name)) {
             if (parameterGroups.get(name).isEmpty()) {
+                // AWS emits this without the space after the type name. Deliberately not
+                // corrected: matching it is the point, and each action words this differently —
+                // describe says "CacheParameterGroup <name> not found." and modify says
+                // "CacheParameterGroup not found: <name>".
                 throw new AwsException("CacheParameterGroupNotFound",
                         "CacheParameterGroupnot found: " + name, 404);
             }

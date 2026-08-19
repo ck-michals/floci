@@ -239,6 +239,36 @@ class ElastiCacheParameterGroupIntegrationTest {
     }
 
     @Test
+    @Order(4)
+    void eachActionWordsItsNotFoundTheWayAwsWordsIt() {
+        // Three actions, three different sentences on a live account — including a delete that
+        // omits the space after the type name. They are pinned here so the odd one cannot be
+        // tidied into the others by someone reading it as a typo.
+        query("DescribeCacheParameterGroups")
+                .formParam("CacheParameterGroupName", "absent-pg")
+        .when().post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("CacheParameterGroup absent-pg not found."));
+
+        query("ModifyCacheParameterGroup")
+                .formParam("CacheParameterGroupName", "absent-pg")
+                .formParam("ParameterNameValues.ParameterNameValue.1.ParameterName", "maxmemory-policy")
+                .formParam("ParameterNameValues.ParameterNameValue.1.ParameterValue", "noeviction")
+        .when().post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("CacheParameterGroup not found: absent-pg"));
+
+        query("DeleteCacheParameterGroup")
+                .formParam("CacheParameterGroupName", "absent-pg")
+        .when().post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("CacheParameterGroupnot found: absent-pg"));
+    }
+
+    @Test
     @Order(5)
     void deleteRemovesItAndTheSecondDeleteReportsItMissing() {
         query("DeleteCacheParameterGroup")
