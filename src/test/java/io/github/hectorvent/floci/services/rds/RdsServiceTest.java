@@ -658,12 +658,17 @@ class RdsServiceTest {
 
     @Test
     void tagOperationsRejectUnsupportedResourceArn() {
-        AwsException exception = assertThrows(AwsException.class, () ->
+        // Parameter groups are tagged now, so an absent one is a missing resource rather than a
+        // missing feature. A type Floci still does not model keeps the limitation message.
+        AwsException absentGroup = assertThrows(AwsException.class, () ->
                 rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:pg:some-parameter-group"));
+        assertEquals("DBParameterGroupNotFound", absentGroup.getErrorCode());
 
-        assertEquals("InvalidParameterValue", exception.getErrorCode());
+        AwsException unsupportedType = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:snapshot:some-snapshot"));
+        assertEquals("InvalidParameterValue", unsupportedType.getErrorCode());
         // The type is valid on real AWS; the message must present this as a Floci limitation.
-        assertTrue(exception.getMessage().contains("not yet implemented by Floci"));
+        assertTrue(unsupportedType.getMessage().contains("not yet implemented by Floci"));
     }
 
     @Test

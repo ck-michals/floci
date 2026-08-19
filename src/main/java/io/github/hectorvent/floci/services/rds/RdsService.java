@@ -713,6 +713,21 @@ public class RdsService implements Resettable {
                     proxies.put(dbProxyKey(effectiveRegion, resolvedProxy.getDbProxyName()), updatedProxy);
                 });
             }
+            case "pg" -> {
+                DbParameterGroup group = getDbParameterGroup(resourceId, effectiveRegion);
+                yield new TagHandle(group.getTags(), updated -> {
+                    group.setTags(updated);
+                    putParameterGroupForRegion(resourceId, effectiveRegion, group);
+                });
+            }
+            case "cluster-pg" -> {
+                DbClusterParameterGroup group =
+                        getDbClusterParameterGroup(resourceId, effectiveRegion);
+                yield new TagHandle(group.getTags(), updated -> {
+                    group.setTags(updated);
+                    putClusterParameterGroupForRegion(resourceId, effectiveRegion, group);
+                });
+            }
             case "og" -> {
                 if (managedOptionGroup(resourceId) != null) {
                     throw new AwsException("InvalidOptionGroupStateFault",
@@ -724,7 +739,7 @@ public class RdsService implements Resettable {
                     putOptionGroupForRegion(resourceId, effectiveRegion, group);
                 });
             }
-            // Valid RDS resource types Floci does not model yet (pg, snapshot, ...) — taggable
+            // Valid RDS resource types Floci does not model yet (snapshot, ri, ...) — taggable
             // on real AWS, so the message states the Floci limitation rather than AWS semantics.
             default -> throw new AwsException("InvalidParameterValue",
                     "Tagging for resource type '" + type + "' is not yet implemented by Floci: " + resourceName, 400);
@@ -2091,6 +2106,7 @@ public class RdsService implements Resettable {
         }
         DbParameterGroup group = new DbParameterGroup(name, family, description);
         group.setRegion(effectiveRegion);
+        group.setDbParameterGroupArn(regionResolver.buildArn("rds", effectiveRegion, "pg:" + name));
         putParameterGroupForRegion(name, effectiveRegion, group);
         return group;
     }
@@ -2239,6 +2255,7 @@ public class RdsService implements Resettable {
         }
         DbClusterParameterGroup group = new DbClusterParameterGroup(name, family, description);
         group.setRegion(effectiveRegion);
+        group.setDbClusterParameterGroupArn(regionResolver.buildArn("rds", effectiveRegion, "cluster-pg:" + name));
         putClusterParameterGroupForRegion(name, effectiveRegion, group);
         return group;
     }
