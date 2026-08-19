@@ -128,11 +128,13 @@ class ElastiCacheSubnetGroupIntegrationTest {
             .statusCode(400)
             .body(containsString("CacheSubnetGroupAlreadyExists"));
 
+        // 400, not 404: the subnet-group fault is declared that way, unlike the parameter-group
+        // one a few hundred lines up, which really is a 404.
         elasticache("DescribeCacheSubnetGroups")
                 .formParam("CacheSubnetGroupName", "no-such-sng")
         .when().post("/")
         .then()
-            .statusCode(404)
+            .statusCode(400)
             .body(containsString("Cache subnet group no-such-sng not found"));
     }
 
@@ -249,7 +251,7 @@ class ElastiCacheSubnetGroupIntegrationTest {
                 .formParam("CacheSubnetGroupName", GROUP)
         .when().post("/")
         .then()
-            .statusCode(404)
+            .statusCode(400)
             .body(containsString("Cache Subnet Group " + GROUP + " does not exist"));
     }
 }

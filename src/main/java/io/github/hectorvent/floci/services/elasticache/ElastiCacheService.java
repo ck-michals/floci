@@ -365,7 +365,7 @@ public class ElastiCacheService {
         }
         return List.of(subnetGroups.get(name)
                 .orElseThrow(() -> new AwsException("CacheSubnetGroupNotFoundFault",
-                        "Cache subnet group " + name + " not found.", 404)));
+                        "Cache subnet group " + name + " not found.", 400)));
     }
 
     /** Replaces the description and, when subnets are given, the whole subnet set. */
@@ -374,7 +374,7 @@ public class ElastiCacheService {
         synchronized (lockFor("sng:" + name)) {
             CacheSubnetGroup existing = subnetGroups.get(name)
                     .orElseThrow(() -> new AwsException("CacheSubnetGroupNotFoundFault",
-                            "Cache subnet group " + name + " not found.", 404));
+                            "Cache subnet group " + name + " not found.", 400));
             String effectiveDescription = description == null ? existing.getDescription() : description;
             CacheSubnetGroup updated;
             if (subnetIds == null || subnetIds.isEmpty()) {
@@ -397,7 +397,7 @@ public class ElastiCacheService {
         synchronized (lockFor("sng:" + name)) {
             if (subnetGroups.get(name).isEmpty()) {
                 throw new AwsException("CacheSubnetGroupNotFoundFault",
-                        "Cache Subnet Group " + name + " does not exist.", 404);
+                        "Cache Subnet Group " + name + " does not exist.", 400);
             }
             subnetGroups.delete(name);
         }
@@ -437,7 +437,13 @@ public class ElastiCacheService {
         return new CacheSubnetGroup(name, description, vpcId, availabilityZones);
     }
 
-    /** Subnet group names take the same identifier rule as parameter group names. */
+    /**
+     * Subnet group names take the same identifier rule as parameter group names.
+     *
+     * <p>The not-found faults do not match, though, and the difference is AWS's: the subnet-group
+     * fault keeps its {@code Fault} suffix on the wire and is a 400, while the parameter-group one
+     * drops the suffix and is a 404. Both are declared that way in the service model.
+     */
     private static void validateSubnetGroupName(String name) {
         if (name == null || name.isBlank() || !PARAMETER_GROUP_NAME.matcher(name).matches()) {
             throw new AwsException("InvalidParameterValue",
