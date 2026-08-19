@@ -145,6 +145,14 @@ public class DocDbService {
         return clusters.get(id).filter(c -> regionOf(c.getDbClusterArn()).equals(region)).isPresent();
     }
 
+    /** Refuses a record whose own ARN is not the one that was asked for. */
+    private static void requireArnNamesRecord(String requested, String stored,
+                                              String errorCode, String message) {
+        if (stored != null && !stored.equalsIgnoreCase(requested)) {
+            throw new AwsException(errorCode, message, 404);
+        }
+    }
+
     /** The region a record was created in, taken from its ARN; older records carry the default. */
     private String regionOf(String arn) {
         return AwsArnUtils.regionOrDefault(arn, regionResolver.getDefaultRegion());
@@ -406,9 +414,16 @@ public class DocDbService {
         String type = resource.substring(0, separator);
         String id = resource.substring(separator + 1);
 
+        // The record has to be the one this ARN names, not merely one of that identifier: records
+        // are keyed by identifier alone, so an ARN whose region matches the caller but not the
+        // stored record would otherwise be answered — and mutated — from another region's
+        // resource. Reachable on the docdb credential scope, which dispatches here directly
+        // rather than through the routing that matches the whole ARN.
         return switch (type) {
             case "cluster" -> {
                 DocDbCluster cluster = getDbCluster(id);
+                requireArnNamesRecord(resourceName, cluster.getDbClusterArn(),
+                        "DBClusterNotFoundFault", "DocDB cluster " + id + " not found.");
                 yield new TagTarget("cluster:" + id, cluster.getTags(), updated -> {
                     cluster.setTags(updated);
                     clusters.put(id, cluster);
@@ -416,6 +431,8 @@ public class DocDbService {
             }
             case "db" -> {
                 DocDbInstance instance = getDbInstance(id);
+                requireArnNamesRecord(resourceName, instance.getDbInstanceArn(),
+                        "DBInstanceNotFound", "DocDB instance " + id + " not found.");
                 yield new TagTarget("instance:" + id, instance.getTags(), updated -> {
                     instance.setTags(updated);
                     instances.put(id, instance);

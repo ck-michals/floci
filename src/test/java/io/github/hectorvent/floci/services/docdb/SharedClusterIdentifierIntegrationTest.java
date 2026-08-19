@@ -313,4 +313,69 @@ class SharedClusterIdentifierIntegrationTest {
 
         rdsService.deleteDbCluster(id, "us-east-1");
     }
+
+    @Test
+    void theDocDbScopeCannotTagAnotherRegionsRecordThroughAMatchingArn() {
+        // On the docdb scope the request goes straight to the service, skipping the routing that
+        // matches the whole ARN. An ARN whose region matches the caller but names a record stored
+        // in another region must not resolve: the identifier alone is not the resource.
+        String id = "arn-identity-clash";
+        String docdbAuth = "AWS4-HMAC-SHA256 Credential=test/20260615/%s/docdb/aws4_request, "
+                + "SignedHeaders=content-type;host, Signature=test";
+
+        given().header("Authorization", docdbAuth.formatted("us-east-1"))
+                .contentType(URLENC)
+                .formParam("Action", "CreateDBCluster")
+                .formParam("Version", "2014-10-31")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", "docdb")
+                .formParam("MasterUsername", "docdbadmin")
+                .formParam("MasterUserPassword", "secret99password")
+                .formParam("Tags.Tag.1.Key", "region")
+                .formParam("Tags.Tag.1.Value", "us-east-1")
+        .when().post("/")
+        .then().statusCode(200);
+
+        // Same identifier, eu-west-1 ARN, signed for eu-west-1: the region check passes, and only
+        // comparing the stored ARN stops this reaching the us-east-1 record.
+        given().header("Authorization", docdbAuth.formatted("eu-west-1"))
+                .contentType(URLENC)
+                .formParam("Action", "ListTagsForResource")
+                .formParam("Version", "2014-10-31")
+                .formParam("ResourceName", "arn:aws:rds:eu-west-1:000000000000:cluster:" + id)
+        .when().post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("DBClusterNotFoundFault"));
+
+        given().header("Authorization", docdbAuth.formatted("eu-west-1"))
+                .contentType(URLENC)
+                .formParam("Action", "AddTagsToResource")
+                .formParam("Version", "2014-10-31")
+                .formParam("ResourceName", "arn:aws:rds:eu-west-1:000000000000:cluster:" + id)
+                .formParam("Tags.Tag.1.Key", "region")
+                .formParam("Tags.Tag.1.Value", "eu-west-1")
+        .when().post("/")
+        .then().statusCode(404);
+
+        // The us-east-1 record still carries only its own tag.
+        given().header("Authorization", docdbAuth.formatted("us-east-1"))
+                .contentType(URLENC)
+                .formParam("Action", "ListTagsForResource")
+                .formParam("Version", "2014-10-31")
+                .formParam("ResourceName", "arn:aws:rds:us-east-1:000000000000:cluster:" + id)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Value>us-east-1</Value>"))
+            .body(not(containsString("<Value>eu-west-1</Value>")));
+
+        given().header("Authorization", docdbAuth.formatted("us-east-1"))
+                .contentType(URLENC)
+                .formParam("Action", "DeleteDBCluster")
+                .formParam("Version", "2014-10-31")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("SkipFinalSnapshot", "true")
+        .when().post("/").then().statusCode(200);
+    }
 }
