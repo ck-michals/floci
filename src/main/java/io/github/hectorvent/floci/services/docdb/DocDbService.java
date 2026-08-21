@@ -25,6 +25,7 @@ import java.util.Optional;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 @ApplicationScoped
 public class DocDbService {
@@ -127,13 +128,23 @@ public class DocDbService {
         }
     }
 
-    /** Every record of one kind in one region, including any not yet moved under a regional key. */
-    private <T> List<T> inRegion(StorageBackend<String, T> store, String region) {
-        List<T> found = new ArrayList<>(store.scan(k -> k.startsWith(region + "::")));
+    /**
+     * Every record of one kind in one region, including any not yet moved under a regional key.
+     *
+     * <p>Two scans of a store a migration is moving records within can each miss what the other
+     * sees, so the unscoped keys are read first and the regional ones second: a record the first
+     * scan misses has been moved already, which the second scan therefore sees, and one the second
+     * misses had not been moved when the first ran. Anything seen twice is one record caught
+     * mid-move, so the list is reduced by identifier.
+     */
+    private <T> List<T> inRegion(StorageBackend<String, T> store, String region,
+                                 Function<T, String> identifier) {
+        Map<String, T> found = new LinkedHashMap<>();
         if (region.equals(regionResolver.getDefaultRegion())) {
-            found.addAll(store.scan(k -> !k.contains("::")));
+            store.scan(k -> !k.contains("::")).forEach(r -> found.put(identifier.apply(r), r));
         }
-        return found;
+        store.scan(k -> k.startsWith(region + "::")).forEach(r -> found.put(identifier.apply(r), r));
+        return List.copyOf(found.values());
     }
 
     @Inject
@@ -302,13 +313,13 @@ public class DocDbService {
             // the bare identifier, so a cross-account or cross-region ARN does not
             // resolve a same-named local cluster.
             if (filterId.startsWith("arn:")) {
-                return inRegion(clusters, region).stream()
+                return inRegion(clusters, region, DocDbCluster::getDbClusterIdentifier).stream()
                         .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
                         .toList();
             }
             return findCluster(region, filterId).map(List::of).orElseGet(List::of);
         }
-        return inRegion(clusters, region);
+        return inRegion(clusters, region, DocDbCluster::getDbClusterIdentifier);
     }
 
     public DocDbCluster modifyDbCluster(String id, String engineVersion, Boolean iamEnabled) {
@@ -412,13 +423,13 @@ public class DocDbService {
             // The db-instance-id filter accepts ARNs as well as identifiers; see
             // listDbClusters for why the match is against the stored ARN.
             if (filterId.startsWith("arn:")) {
-                return inRegion(instances, region).stream()
+                return inRegion(instances, region, DocDbInstance::getDbInstanceIdentifier).stream()
                         .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))
                         .toList();
             }
             return findInstance(region, filterId).map(List::of).orElseGet(List::of);
         }
-        return inRegion(instances, region);
+        return inRegion(instances, region, DocDbInstance::getDbInstanceIdentifier);
     }
 
     public DocDbInstance modifyDbInstance(String id, String dbInstanceClass, Boolean iamEnabled) {
@@ -445,7 +456,7 @@ public class DocDbService {
                             "DocDB instance " + id + " not found.", 404));
 
             String clusterId = instance.getDbClusterIdentifier();
-            synchronized (lockFor("cluster:" + clusterId)) {
+            synchronized (lockFor("cluster:" + key(region, clusterId))) {
                 DocDbCluster cluster = findCluster(region, clusterId).orElse(null);
                 if (cluster != null) {
                     cluster.getDbClusterMembers().remove(id);
