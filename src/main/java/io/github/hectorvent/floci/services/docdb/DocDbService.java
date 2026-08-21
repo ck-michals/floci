@@ -42,6 +42,13 @@ public class DocDbService {
      * One monitor per stored record, taken by everything that writes it. A tag update is a
      * read-modify-write, so without a lock shared with delete it can put a deleted cluster back.
      */
+    /**
+     * One monitor per record, taken by everything that writes it, and retired with the record.
+     *
+     * <p>Retiring one means a straggler can hold the old monitor while a later caller takes a new
+     * one for the same key, so a write must not depend on the monitor alone for its safety: the
+     * writes that can outlive a delete check the record under the key is still theirs.
+     */
     private final ConcurrentHashMap<String, Object> writeLocks = new ConcurrentHashMap<>();
 
     /**
@@ -97,6 +104,26 @@ public class DocDbService {
                 LOG.debugv("Moved DocDB instance {0} under its {1} key", id, region);
             });
             return legacy;
+        }
+    }
+
+    /**
+     * Writes a record filled in on read, unless it has been deleted meanwhile.
+     *
+     * <p>Filling a field in on read is still a write, and a read is not otherwise serialised
+     * against a delete — so without the record's monitor and a second look inside it, a reader
+     * that started before a delete puts the record back after it.
+     */
+    private <T> void persistIfStillPresent(StorageBackend<String, T> store, String monitor,
+                                           String key, T record) {
+        // Two things, because a field filled in on read is still a write. The monitor is the one
+        // every other writer of this record takes — naming it differently would be no mutual
+        // exclusion at all — and the record stored under the key has to still be this record, so
+        // that a delete, or a delete and a re-create under the same name, is not written over.
+        synchronized (lockFor(monitor)) {
+            if (store.get(key).orElse(null) == record) {
+                store.put(key, record);
+            }
         }
     }
 
@@ -190,7 +217,7 @@ public class DocDbService {
                         "DocDB cluster " + id + " not found.", 404));
         if (cluster.getDbClusterArn() == null || cluster.getDbClusterArn().isBlank()) {
             cluster.setDbClusterArn(legacyArn(region, "cluster:" + id));
-            clusters.put(key(region, id), cluster);
+            persistIfStillPresent(clusters, "cluster:" + key(region, id), key(region, id), cluster);
         }
         return cluster;
     }
@@ -374,7 +401,7 @@ public class DocDbService {
                         "DocDB instance " + id + " not found.", 404));
         if (instance.getDbInstanceArn() == null || instance.getDbInstanceArn().isBlank()) {
             instance.setDbInstanceArn(legacyArn(region, "db:" + id));
-            instances.put(key(region, id), instance);
+            persistIfStillPresent(instances, "instance:" + key(region, id), key(region, id), instance);
         }
         return instance;
     }
