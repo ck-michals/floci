@@ -329,4 +329,57 @@ class DocDbLegacyMigrationRaceTest {
                     clusterId + " could not be removed after the race (attempt " + attempt + ")");
         }
     }
+
+    @Test
+    void aDeleteCannotSlipBetweenTheMovesReadAndItsWrite() throws Exception {
+        // Staged, because the racing loop above does not reach this one: the move reads the record
+        // from the unscoped key and writes it under the regional one, and a delete landing between
+        // those two would be undone by that write. Holding the move at its write and letting a
+        // delete run is that interleaving exactly.
+        PausingStorageBackend<DocDbCluster> pausing =
+                new PausingStorageBackend<>(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>());
+        serviceOver(pausing);
+        String id = "moved-while-deleted";
+        DocDbCluster legacy = new DocDbCluster();
+        legacy.setDbClusterIdentifier(id);
+        legacy.setStatus("available");
+        clusterStore.put(id, legacy);
+
+        AtomicReference<Throwable> unexpected = new AtomicReference<>();
+        pausing.pauseOn(PausingStorageBackend.Call.PUT, "us-east-1::" + id);
+
+        Thread mover = new Thread(() -> {
+            try {
+                service.getDbCluster(id);
+            } catch (AwsException expected) {
+                // losing to the delete is a legitimate outcome
+            } catch (Throwable t) {
+                unexpected.set(t);
+            }
+        });
+        mover.start();
+        pausing.awaitReached();
+
+        Thread deleter = new Thread(() -> {
+            try {
+                service.deleteDbCluster(id);
+            } catch (AwsException expected) {
+                // so is finding it already gone
+            } catch (Throwable t) {
+                unexpected.set(t);
+            }
+        });
+        deleter.start();
+        // Sharing the monitor is what stops the delete finishing here: it should still be waiting.
+        deleter.join(TimeUnit.SECONDS.toMillis(1));
+
+        pausing.release();
+        mover.join(TimeUnit.SECONDS.toMillis(10));
+        deleter.join(TimeUnit.SECONDS.toMillis(10));
+        assertNull(unexpected.get(), () -> "unexpected failure: " + unexpected.get());
+
+        assertFalse(clusterStore.get("us-east-1::" + id).isPresent(),
+                "the move wrote the record back after it was deleted");
+        assertFalse(clusterStore.get(id).isPresent(), "the unscoped key was left behind");
+    }
 }
