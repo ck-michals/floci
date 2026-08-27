@@ -26,6 +26,9 @@ import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
@@ -146,6 +149,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final SecretsManagerService secretsManagerService;
+    private final KmsService kmsService;
     private final DockerHostResolver dockerHostResolver;
     private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private final ResourceGroupsTaggingService taggingService;
@@ -181,13 +185,15 @@ public class RdsService implements Resettable, ResourceProvider {
                       SecretsManagerService secretsManagerService,
                       DockerHostResolver dockerHostResolver,
                       CurrentContainerNetworkResolver currentContainerNetworkResolver,
-                      ResourceGroupsTaggingService taggingService) {
+                      ResourceGroupsTaggingService taggingService,
+                      KmsService kmsService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
         this.regionResolver = regionResolver;
         this.config = config;
         this.secretsManagerService = secretsManagerService;
+        this.kmsService = kmsService;
         this.dockerHostResolver = dockerHostResolver;
         this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.taggingService = taggingService;
@@ -299,7 +305,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
                 secretsManagerService, dockerHostResolver, currentContainerNetworkResolver,
-                proxies, proxyTargetGroups, new InMemoryStorage<>(), null);
+                proxies, proxyTargetGroups, new InMemoryStorage<>(), null, null);
     }
 
     RdsService(RdsContainerManager containerManager,
@@ -318,13 +324,15 @@ public class RdsService implements Resettable, ResourceProvider {
                StorageBackend<String, DbProxy> proxies,
                StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups,
                StorageBackend<String, OptionGroup> optionGroups,
-               ResourceGroupsTaggingService taggingService) {
+               ResourceGroupsTaggingService taggingService,
+               KmsService kmsService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
         this.regionResolver = regionResolver;
         this.config = config;
         this.secretsManagerService = secretsManagerService;
+        this.kmsService = kmsService;
         this.dockerHostResolver = dockerHostResolver;
         this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.instances = instances;
@@ -483,6 +491,28 @@ public class RdsService implements Resettable, ResourceProvider {
                                        String optionGroupName,
                                        String region,
                                        boolean autoMinorVersionUpgrade) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                optionGroupName, region, autoMinorVersionUpgrade, DbInstanceSettings.defaults());
+    }
+
+    public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz, boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags,
+                                       List<String> vpcSecurityGroupIds,
+                                       String optionGroupName,
+                                       String region,
+                                       boolean autoMinorVersionUpgrade,
+                                       DbInstanceSettings settings) {
+        validateInstanceSettings(settings);
         String provisioningKey = "instance:" + currentAccountId() + ":"
                 + dbResourceKey(effectiveRegion(region), id);
         if (!provisioningIds.add(provisioningKey)) {
@@ -494,7 +524,8 @@ public class RdsService implements Resettable, ResourceProvider {
                     masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
                     paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone,
                     multiAz, manageMasterUserPassword, masterUserSecretKmsKeyId, tags,
-                    vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade);
+                    vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
+                    settings);
         } finally {
             provisioningIds.remove(provisioningKey);
         }
@@ -512,7 +543,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                           List<String> vpcSecurityGroupIds,
                                           String optionGroupName,
                                           String region,
-                                          boolean autoMinorVersionUpgrade) {
+                                          boolean autoMinorVersionUpgrade,
+                                          DbInstanceSettings settings) {
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -530,6 +562,9 @@ public class RdsService implements Resettable, ResourceProvider {
         validateInstanceParameterGroup(
                 paramGroupName, engineParam, engineVersion, effectiveRegion);
         validateInstanceOptionGroup(optionGroupName, engineParam, engineVersion, effectiveRegion);
+        // resolved with the other validations, before a port is taken or a container started
+        DbInstanceSettings resolvedSettings =
+                settings.withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), effectiveRegion));
         boolean mock = config.services().rds().mock();
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
@@ -620,6 +655,7 @@ public class RdsService implements Resettable, ResourceProvider {
         instance.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
         instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
         instance.setEngineIdentifier(engineIdentifier);
+        resolvedSettings.applyTo(instance);
 
         instance.setDbiResourceId(dbiResourceId);
         instance.setDbInstanceArn(dbInstanceArn);
@@ -1018,6 +1054,19 @@ public class RdsService implements Resettable, ResourceProvider {
             String id, String newPassword, Boolean iamEnabled,
             String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
             String optionGroupName, String region, Boolean autoMinorVersionUpgrade) {
+        return modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName,
+                vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
+                DbInstanceSettings.unchanged());
+    }
+
+    // synchronized like the tag and delete paths: an unguarded read-modify-write here could
+    // write an instance back after deleteDbInstance removed it
+    public synchronized DbInstance modifyDbInstance(
+            String id, String newPassword, Boolean iamEnabled,
+            String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
+            String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
+            DbInstanceSettings settings) {
+        validateInstanceSettings(settings);
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
         instance.setStatus(DbInstanceStatus.AVAILABLE);
@@ -1043,9 +1092,43 @@ public class RdsService implements Resettable, ResourceProvider {
         if (autoMinorVersionUpgrade != null) {
             instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
         }
+        settings.applyTo(instance);
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
         LOG.infov("DB instance {0} modified", id);
         return instance;
+    }
+
+    private static void validateInstanceSettings(DbInstanceSettings settings) {
+        settings.validate();
+    }
+
+    /**
+     * A live account takes the key as an ARN, a key id, an alias ARN or an alias name and reports
+     * the key ARN on the instance; a key it cannot use is one fault whatever the reason.
+     */
+    private String resolveKmsKeyArn(String kmsKeyId, String region) {
+        if (kmsKeyId == null || kmsKeyId.isBlank()) {
+            return null;
+        }
+        if (kmsService == null) {
+            throw new IllegalStateException("RdsService was built without a KmsService; "
+                    + "a KmsKeyId cannot be resolved");
+        }
+        KmsKey key;
+        try {
+            key = kmsService.describeKey(kmsKeyId, region);
+        } catch (AwsException e) {
+            throw kmsKeyNotAccessible(kmsKeyId);
+        }
+        if (!key.isEnabled() || "PendingDeletion".equals(key.getKeyState())) {
+            throw kmsKeyNotAccessible(kmsKeyId);
+        }
+        return key.getArn();
+    }
+
+    private static AwsException kmsKeyNotAccessible(String kmsKeyId) {
+        return new AwsException("KMSKeyNotAccessibleFault", "The specified KMS key [" + kmsKeyId
+                + "] does not exist, is not enabled or you do not have permissions to access it.", 400);
     }
 
     public List<Map<String, String>> describeOrderableDbInstanceOptions(String engine,
