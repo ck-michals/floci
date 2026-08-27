@@ -4955,4 +4955,36 @@ class RdsServiceTest {
         assertEquals("aurora-postgresql", rdsService.getDbInstance("member-2").getEngineIdentifier());
         assertEquals("postgres", rdsService.getDbInstance("plain").getEngineIdentifier());
     }
+
+    @Test
+    void restoreGivesAPersistedAuroraMemberItsClusterEngineName() {
+        // A member written by a floci that predates engineIdentifier carries only the enum, which
+        // says postgres for an aurora-postgresql cluster. The cluster still knows, and the restore
+        // reads it there, so the member is reported and filtered as aurora-postgresql.
+        InMemoryStorage<String, DbInstance> instances = new InMemoryStorage<>();
+        InMemoryStorage<String, DbCluster> clusters = new InMemoryStorage<>();
+        RdsService service = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.createDbCluster("aurora", "aurora-postgresql", null, "admin", "secret99password",
+                null, false, null);
+
+        DbInstance legacyMember = new DbInstance();
+        legacyMember.setDbInstanceIdentifier("legacy-member");
+        legacyMember.setEngine(DatabaseEngine.POSTGRES);
+        legacyMember.setDbClusterIdentifier("aurora");
+        legacyMember.setDbInstanceArn("arn:aws:rds:us-east-1:123456789012:db:legacy-member");
+        legacyMember.setStatus(DbInstanceStatus.AVAILABLE);
+        instances.put("us-east-1::legacy-member", legacyMember);
+        DbInstance legacyStandalone = new DbInstance();
+        legacyStandalone.setDbInstanceIdentifier("legacy-plain");
+        legacyStandalone.setEngine(DatabaseEngine.MARIADB);
+        legacyStandalone.setDbInstanceArn("arn:aws:rds:us-east-1:123456789012:db:legacy-plain");
+        legacyStandalone.setStatus(DbInstanceStatus.AVAILABLE);
+        instances.put("us-east-1::legacy-plain", legacyStandalone);
+
+        service.restorePersistedRuntime();
+
+        assertEquals("aurora-postgresql", service.getDbInstance("legacy-member").getEngineIdentifier());
+        assertEquals("mariadb", service.getDbInstance("legacy-plain").getEngineIdentifier());
+    }
 }

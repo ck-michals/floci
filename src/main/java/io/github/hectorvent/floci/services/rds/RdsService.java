@@ -338,6 +338,7 @@ public class RdsService implements Resettable, ResourceProvider {
         restoreInstances();
         restoreProxies();
         backfillManagedSecretOwnership();
+        backfillInstanceEngineIdentifiers();
     }
 
     public void clear() {
@@ -841,6 +842,43 @@ public class RdsService implements Resettable, ResourceProvider {
             }
         } catch (RuntimeException e) {
             LOG.warnv(e, "Skipped the master user secret ownership backfill");
+        }
+    }
+
+    /**
+     * Gives an instance persisted before {@code engineIdentifier} existed the engine name AWS would
+     * report: for a cluster member, its cluster's (an Aurora member is aurora-postgresql, which the
+     * enum alone cannot say); for a standalone instance, the enum's name. Read from the cluster,
+     * which is authoritative — never guessed from the instance's own identifier.
+     */
+    void backfillInstanceEngineIdentifiers() {
+        try {
+            for (DbInstance instance : allInstances()) {
+                if (instance.getEngineIdentifier() != null && !instance.getEngineIdentifier().isBlank()) {
+                    continue;
+                }
+                String accountId = accountIdFromArn(instance.getDbInstanceArn());
+                String region = regionFromArn(instance.getDbInstanceArn());
+                String engineIdentifier = null;
+                String clusterId = instance.getDbClusterIdentifier();
+                if (clusterId != null && !clusterId.isBlank()) {
+                    DbCluster cluster = findClusterForScope(accountId, region, clusterId);
+                    if (cluster != null && cluster.getEngineIdentifier() != null) {
+                        engineIdentifier = cluster.getEngineIdentifier().toLowerCase();
+                    }
+                }
+                if (engineIdentifier == null && instance.getEngine() != null) {
+                    engineIdentifier = instance.getEngine().name().toLowerCase();
+                }
+                if (engineIdentifier == null) {
+                    continue;
+                }
+                instance.setEngineIdentifier(engineIdentifier);
+                putInstanceForScope(accountId, region, instance.getDbInstanceIdentifier(), instance);
+            }
+        } catch (RuntimeException e) {
+            // Reading persisted state must not be able to stop the emulator from starting.
+            LOG.warnv(e, "Skipped the instance engine name backfill");
         }
     }
 
