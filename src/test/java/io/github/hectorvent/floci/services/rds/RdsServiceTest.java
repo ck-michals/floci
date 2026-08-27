@@ -5151,6 +5151,27 @@ class RdsServiceTest {
                 new DbInstanceSettings(null, null, 7, "23:45-00:15", "wed:00:00-wed:00:30", null)));
         assertEquals("The backup window and maintenance window must not overlap.", wrapping.getMessage());
 
+        // across the week boundary in both directions: a Sunday backup window running into Monday
+        // against an early-Monday maintenance window, and a Sunday-night maintenance window running
+        // into Monday against an early-Monday backup window
+        AwsException sundayBackup = assertThrows(AwsException.class, () -> rdsService.createDbInstance(
+                "mydb", "postgres", "13", "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, 7, "23:45-00:15", "mon:00:00-mon:00:30", null)));
+        assertEquals("The backup window and maintenance window must not overlap.", sundayBackup.getMessage());
+        AwsException sundayMaintenance = assertThrows(AwsException.class, () -> rdsService.createDbInstance(
+                "mydb", "postgres", "13", "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, 7, "00:00-00:30", "sun:23:45-mon:00:15", null)));
+        assertEquals("The backup window and maintenance window must not overlap.", sundayMaintenance.getMessage());
+        // and the same shapes a minute apart are clear
+        rdsService.createDbInstance("clear", "postgres", "13", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, 7, "23:45-00:15", "mon:00:15-mon:00:45", null));
+
         // a window given alone is checked against the one that will be in effect: on create the
         // default, which is swapped for the alternate rather than refused since AWS would have
         // picked a random window clear of the given one

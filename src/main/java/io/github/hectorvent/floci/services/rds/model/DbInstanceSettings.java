@@ -127,11 +127,16 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         return Integer.parseInt(m.group(1)) * 60 + Integer.parseInt(m.group(2));
     }
 
+    /**
+     * The backup window recurs every day, so it is laid over each day of the week and compared
+     * with the maintenance window in the same week, the week before and the week after — a
+     * window that wraps past Sunday midnight or before Monday midnight lands in a neighbour.
+     */
     private static boolean overlap(int[] dailyBackup, int[] weeklyMaintenance) {
         for (int day = 0; day < 7; day++) {
             int start = day * MINUTES_PER_DAY + dailyBackup[0];
             int end = day * MINUTES_PER_DAY + dailyBackup[1];
-            for (int shift : new int[] {0, MINUTES_PER_WEEK}) {
+            for (int shift : new int[] {-MINUTES_PER_WEEK, 0, MINUTES_PER_WEEK}) {
                 if (start < weeklyMaintenance[1] - shift && weeklyMaintenance[0] - shift < end) {
                     return true;
                 }
