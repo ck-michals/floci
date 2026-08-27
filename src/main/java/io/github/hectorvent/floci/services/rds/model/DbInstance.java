@@ -13,6 +13,9 @@ public class DbInstance {
 
     private String dbInstanceIdentifier;
     private DatabaseEngine engine;
+    // the engine name the request gave (aurora-postgresql, postgres, ...): the enum collapses the
+    // Aurora names onto the community engine that backs them, which is not what AWS reports
+    private String engineIdentifier;
     private String engineVersion;
     private String masterUsername;
     private String masterPassword;
@@ -119,6 +122,9 @@ public class DbInstance {
 
     public String getDbSubnetGroupName() { return dbSubnetGroupName; }
     public void setDbSubnetGroupName(String dbSubnetGroupName) { this.dbSubnetGroupName = dbSubnetGroupName; }
+
+    public String getEngineIdentifier() { return engineIdentifier; }
+    public void setEngineIdentifier(String engineIdentifier) { this.engineIdentifier = engineIdentifier; }
 
     public String getDbClusterIdentifier() { return dbClusterIdentifier; }
     public void setDbClusterIdentifier(String dbClusterIdentifier) { this.dbClusterIdentifier = dbClusterIdentifier; }

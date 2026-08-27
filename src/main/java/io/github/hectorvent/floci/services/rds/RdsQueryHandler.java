@@ -1221,7 +1221,7 @@ public class RdsQueryHandler {
 
     private String dbInstanceInnerXml(DbInstance i) {
         DbEndpoint ep = i.getEndpoint();
-        String engineStr = i.getEngine() != null ? i.getEngine().name() : "";
+        String engineStr = instanceEngine(i);
         String statusStr = i.getStatus() != null ? statusLabel(i.getStatus()) : "available";
 
         XmlBuilder xml = new XmlBuilder()
@@ -1653,7 +1653,14 @@ public class RdsQueryHandler {
         return engine.toLowerCase();
     }
 
+    /**
+     * The engine name AWS reports for the instance: the one the request gave (an Aurora member
+     * says aurora-postgresql, not postgres), or the enum for a record persisted before it was kept.
+     */
     private static String instanceEngine(DbInstance i) {
+        if (i.getEngineIdentifier() != null && !i.getEngineIdentifier().isBlank()) {
+            return i.getEngineIdentifier().toLowerCase();
+        }
         return i.getEngine() != null ? i.getEngine().name().toLowerCase() : "";
     }
 

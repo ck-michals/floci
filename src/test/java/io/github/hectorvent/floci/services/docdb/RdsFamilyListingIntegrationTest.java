@@ -130,6 +130,39 @@ class RdsFamilyListingIntegrationTest {
     }
 
     @Test
+    void auroraMemberInstancesAnswerToTheirAuroraEngineName() {
+        createBoth();
+        String member = "family-aurora-1";
+        query("rds", "us-east-1", "CreateDBInstance")
+                .formParam("DBInstanceIdentifier", member)
+                .formParam("DBInstanceClass", "db.t3.medium")
+                .formParam("Engine", "aurora-postgresql")
+                .formParam("DBClusterIdentifier", AURORA)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<Engine>aurora-postgresql</Engine>"));
+        try {
+            query("rds", "us-east-1", "DescribeDBInstances")
+                    .formParam("Filters.Filter.1.Name", "engine")
+                    .formParam("Filters.Filter.1.Values.Value.1", "aurora-postgresql")
+            .when().post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<DBInstanceIdentifier>" + member + "</DBInstanceIdentifier>"))
+                .body(not(containsString("<DBInstanceIdentifier>" + DOCS_INSTANCE + "</DBInstanceIdentifier>")));
+            query("rds", "us-east-1", "DescribeDBInstances")
+                    .formParam("Filters.Filter.1.Name", "engine")
+                    .formParam("Filters.Filter.1.Values.Value.1", "postgres")
+            .when().post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("<DBInstanceIdentifier>" + member + "</DBInstanceIdentifier>")));
+        } finally {
+            query("rds", "us-east-1", "DeleteDBInstance").formParam("DBInstanceIdentifier", member)
+                    .when().post("/");
+        }
+    }
+
+    @Test
     void identifierFormStillFaultsForAnUnknownClusterOnEitherScope() {
         createBoth();
         for (String scope : new String[] {"rds", "docdb"}) {

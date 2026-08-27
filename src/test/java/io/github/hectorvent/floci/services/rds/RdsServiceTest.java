@@ -4937,5 +4937,22 @@ class RdsServiceTest {
         // and the tags are what a restart reads back, not a side table
         assertEquals(Map.of("Name", "tagged", "env", "stg", "extra", "yes"),
                 rdsService.getDbSubnetGroup("tagged", "us-east-1").getTags());
+    void createDbInstanceKeepsTheEngineNameTheRequestGave() {
+        rdsService.createDbCluster("aurora", "aurora-postgresql", null, "admin", "secret99password",
+                null, false, null);
+        rdsService.createDbInstance("member", "aurora-postgresql", "16",
+                "admin", "password", null, "db.t3.medium",
+                20, false, null, null, "aurora", null, false);
+        rdsService.createDbInstance("member-2", null, "16",
+                "admin", "password", null, "db.t3.medium",
+                20, false, null, null, "aurora", null, false);
+        rdsService.createDbInstance("plain", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        assertEquals("aurora-postgresql", rdsService.getDbInstance("member").getEngineIdentifier());
+        // a member created without Engine takes the cluster's
+        assertEquals("aurora-postgresql", rdsService.getDbInstance("member-2").getEngineIdentifier());
+        assertEquals("postgres", rdsService.getDbInstance("plain").getEngineIdentifier());
     }
 }

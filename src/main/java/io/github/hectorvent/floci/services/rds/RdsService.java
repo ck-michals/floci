@@ -545,6 +545,8 @@ public class RdsService implements Resettable, ResourceProvider {
         String instanceStorageResourceId = dbiResourceId;
         PlacementResolution placement;
 
+        String engineIdentifier = engineParam != null && !engineParam.isBlank()
+                ? engineParam.toLowerCase() : null;
         if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
             // Cluster member — share the cluster's container (none exists in mock mode)
             DbCluster cluster = Optional.ofNullable(
@@ -553,6 +555,9 @@ public class RdsService implements Resettable, ResourceProvider {
                     .orElseThrow(() ->
                     new AwsException("DBClusterNotFoundFault",
                             "DB cluster " + dbClusterIdentifier + " not found.", 404));
+            if (engineIdentifier == null && cluster.getEngineIdentifier() != null) {
+                engineIdentifier = cluster.getEngineIdentifier().toLowerCase();
+            }
             backendHost = cluster.getContainerHost();
             backendPort = cluster.getContainerPort();
             containerId = cluster.getContainerId();
@@ -608,6 +613,7 @@ public class RdsService implements Resettable, ResourceProvider {
         instance.setMultiAz(placement.multiAz());
         instance.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
         instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
+        instance.setEngineIdentifier(engineIdentifier);
 
         instance.setDbiResourceId(dbiResourceId);
         instance.setDbInstanceArn(dbInstanceArn);

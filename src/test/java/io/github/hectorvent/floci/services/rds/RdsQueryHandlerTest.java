@@ -2149,4 +2149,31 @@ class RdsQueryHandlerTest {
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("Unrecognized engine name: bogus"));
     }
+
+    @Test
+    void describeDbInstances_auroraMemberIsFilteredAndReportedByItsAuroraEngineName() {
+        DbInstance member = makeInstance("member");
+        member.setEngine(DatabaseEngine.POSTGRES);
+        member.setEngineIdentifier("aurora-postgresql");
+        DbInstance legacy = makeInstance("legacy");
+        legacy.setEngine(DatabaseEngine.POSTGRES);
+        when(service.listDbInstances(null, null)).thenReturn(List.of(member, legacy));
+        when(docDbHandler.instanceRowsXml(null)).thenReturn(List.of());
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "engine");
+        p.add("Filters.Filter.1.Values.Value.1", "aurora-postgresql");
+        String body = (String) handler.handle("DescribeDBInstances", p).getEntity();
+        assertTrue(body.contains("<DBInstanceIdentifier>member</DBInstanceIdentifier>"), body);
+        assertTrue(body.contains("<Engine>aurora-postgresql</Engine>"), body);
+        assertFalse(body.contains("<DBInstanceIdentifier>legacy</DBInstanceIdentifier>"), body);
+
+        p = params();
+        p.add("Filters.Filter.1.Name", "engine");
+        p.add("Filters.Filter.1.Values.Value.1", "postgres");
+        body = (String) handler.handle("DescribeDBInstances", p).getEntity();
+        assertFalse(body.contains("<DBInstanceIdentifier>member</DBInstanceIdentifier>"), body);
+        assertTrue(body.contains("<DBInstanceIdentifier>legacy</DBInstanceIdentifier>"), body);
+        assertTrue(body.contains("<Engine>postgres</Engine>"), body);
+    }
 }
