@@ -66,7 +66,9 @@ windows are at least 30 minutes and may not overlap). `KmsKeyId` is accepted as 
 key id, alias ARN or alias name, resolved against the KMS store in the request's region and
 returned as the key ARN; a key that does not exist or is not enabled is
 `KMSKeyNotAccessibleFault`. Where AWS picks a random window,
-Floci uses `04:00-06:00` and `mon:00:00-mon:03:00`; modifications apply immediately —
+Floci uses `04:00-06:00` and `mon:00:00-mon:03:00` (or `06:30-07:00` / `sun:06:30-sun:07:00`
+when the window given on create overlaps the usual default); a window given on modify is
+checked against the instance's other window. Modifications apply immediately —
 `PendingModifiedValues` is not modeled.
 
 ## Configuration

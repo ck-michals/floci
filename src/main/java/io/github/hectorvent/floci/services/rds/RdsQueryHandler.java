@@ -1274,9 +1274,6 @@ public class RdsQueryHandler {
         return new XmlBuilder().start("DBInstance").raw(dbInstanceInnerXml(i)).end("DBInstance").build();
     }
 
-    private static final String DEFAULT_MAINTENANCE_WINDOW = "mon:00:00-mon:03:00";
-    private static final String DEFAULT_BACKUP_WINDOW = "04:00-06:00";
-
     private String dbInstanceInnerXml(DbInstance i) {
         DbEndpoint ep = i.getEndpoint();
         String engineStr = instanceEngine(i);
@@ -1306,9 +1303,9 @@ public class RdsQueryHandler {
            .elem("PubliclyAccessible", false)
            .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", i.getPreferredMaintenanceWindow() != null
-                   ? i.getPreferredMaintenanceWindow() : DEFAULT_MAINTENANCE_WINDOW)
+                   ? i.getPreferredMaintenanceWindow() : DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW)
            .elem("PreferredBackupWindow", i.getPreferredBackupWindow() != null
-                   ? i.getPreferredBackupWindow() : DEFAULT_BACKUP_WINDOW)
+                   ? i.getPreferredBackupWindow() : DbInstanceSettings.DEFAULT_BACKUP_WINDOW)
            .elem("BackupRetentionPeriod", i.getBackupRetentionPeriod())
            .elem("StorageEncrypted", i.isStorageEncrypted())
            .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())

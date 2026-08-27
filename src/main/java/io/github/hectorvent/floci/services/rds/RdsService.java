@@ -563,8 +563,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 paramGroupName, engineParam, engineVersion, effectiveRegion);
         validateInstanceOptionGroup(optionGroupName, engineParam, engineVersion, effectiveRegion);
         // resolved with the other validations, before a port is taken or a container started
-        DbInstanceSettings resolvedSettings =
-                settings.withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), effectiveRegion));
+        DbInstanceSettings resolvedSettings = withEffectiveWindows(settings, null)
+                .withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), effectiveRegion));
         boolean mock = config.services().rds().mock();
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
@@ -1069,6 +1069,7 @@ public class RdsService implements Resettable, ResourceProvider {
         validateInstanceSettings(settings);
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
+        DbInstanceSettings effective = withEffectiveWindows(settings, instance);
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (optionGroupName != null && !optionGroupName.isBlank()) {
             validateInstanceOptionGroup(optionGroupName,
@@ -1092,7 +1093,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (autoMinorVersionUpgrade != null) {
             instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
         }
-        settings.applyTo(instance);
+        effective.applyTo(instance);
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
         LOG.infov("DB instance {0} modified", id);
         return instance;
@@ -1100,6 +1101,47 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private static void validateInstanceSettings(DbInstanceSettings settings) {
         settings.validate();
+    }
+
+    /**
+     * The windows that will be in effect after the request, checked against each other the way a
+     * live account checks them. On create ({@code current} null) a window given alone is paired
+     * with a default, and with the alternate default when it would overlap the usual one — AWS
+     * picks a random window clear of the given one. On modify the counterpart is the instance's.
+     */
+    private static DbInstanceSettings withEffectiveWindows(DbInstanceSettings settings, DbInstance current) {
+        String backup = settings.preferredBackupWindow();
+        String maintenance = settings.preferredMaintenanceWindow();
+        boolean backupGiven = backup != null;
+        boolean maintenanceGiven = maintenance != null;
+        if (current == null) {
+            if (!backupGiven) {
+                backup = maintenanceGiven && DbInstanceSettings.windowsOverlap(
+                        DbInstanceSettings.DEFAULT_BACKUP_WINDOW, maintenance)
+                        ? DbInstanceSettings.ALTERNATE_BACKUP_WINDOW
+                        : DbInstanceSettings.DEFAULT_BACKUP_WINDOW;
+            }
+            if (!maintenanceGiven) {
+                maintenance = backupGiven && DbInstanceSettings.windowsOverlap(
+                        backup, DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW)
+                        ? DbInstanceSettings.ALTERNATE_MAINTENANCE_WINDOW
+                        : DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW;
+            }
+        } else {
+            if (!backupGiven) {
+                backup = current.getPreferredBackupWindow() != null
+                        ? current.getPreferredBackupWindow() : DbInstanceSettings.DEFAULT_BACKUP_WINDOW;
+            }
+            if (!maintenanceGiven) {
+                maintenance = current.getPreferredMaintenanceWindow() != null
+                        ? current.getPreferredMaintenanceWindow() : DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW;
+            }
+        }
+        if (DbInstanceSettings.windowsOverlap(backup, maintenance)) {
+            throw DbInstanceSettings.overlappingWindows();
+        }
+        return new DbInstanceSettings(settings.storageEncrypted(), settings.kmsKeyId(),
+                settings.backupRetentionPeriod(), backup, maintenance, settings.copyTagsToSnapshot());
     }
 
     /**

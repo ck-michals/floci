@@ -26,6 +26,16 @@ public record DbInstanceSettings(Boolean storageEncrypted,
     private static final int MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY;
     private static final int MINIMUM_WINDOW_MINUTES = 30;
 
+    /**
+     * Where AWS picks a random 30-minute window, Floci picks these; the alternates are used when a
+     * window given on create overlaps the default of the other kind, since AWS would have picked a
+     * random window clear of it.
+     */
+    public static final String DEFAULT_BACKUP_WINDOW = "04:00-06:00";
+    public static final String DEFAULT_MAINTENANCE_WINDOW = "mon:00:00-mon:03:00";
+    public static final String ALTERNATE_BACKUP_WINDOW = "06:30-07:00";
+    public static final String ALTERNATE_MAINTENANCE_WINDOW = "sun:06:30-sun:07:00";
+
     public static DbInstanceSettings defaults() {
         return new DbInstanceSettings(null, null, null, null, null, null);
     }
@@ -35,21 +45,32 @@ public record DbInstanceSettings(Boolean storageEncrypted,
     }
 
     /**
-     * The checks a live account applies to these parameters, with its wording. The retention
-     * period is not range-checked: AWS accepted 40 days on a postgres instance.
+     * The per-parameter checks a live account applies, with its wording. The retention period is
+     * not range-checked: AWS accepted 40 days on a postgres instance. Overlap between the windows
+     * is checked by the service against the windows that will be in effect, since the counterpart
+     * of a window given alone comes from the instance or from a default.
      */
     public void validate() {
         if (kmsKeyId != null && !kmsKeyId.isBlank() && !Boolean.TRUE.equals(storageEncrypted)) {
             throw new AwsException("InvalidParameterCombination",
                     "You must enable StorageEncrypted when you specify KmsKeyId", 400);
         }
-        int[] backup = preferredBackupWindow == null ? null : parseBackupWindow(preferredBackupWindow);
-        int[] maintenance = preferredMaintenanceWindow == null ? null
-                : parseMaintenanceWindow(preferredMaintenanceWindow);
-        if (backup != null && maintenance != null && overlap(backup, maintenance)) {
-            throw new AwsException("InvalidParameterValue",
-                    "The backup window and maintenance window must not overlap.", 400);
+        if (preferredBackupWindow != null) {
+            parseBackupWindow(preferredBackupWindow);
         }
+        if (preferredMaintenanceWindow != null) {
+            parseMaintenanceWindow(preferredMaintenanceWindow);
+        }
+    }
+
+    /** Whether a daily backup window and a weekly maintenance window share any minute. */
+    public static boolean windowsOverlap(String backupWindow, String maintenanceWindow) {
+        return overlap(parseBackupWindow(backupWindow), parseMaintenanceWindow(maintenanceWindow));
+    }
+
+    public static AwsException overlappingWindows() {
+        return new AwsException("InvalidParameterValue",
+                "The backup window and maintenance window must not overlap.", 400);
     }
 
     /** Start and end as minutes of the day; the end is pushed past midnight when the window wraps. */

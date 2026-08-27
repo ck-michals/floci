@@ -5151,6 +5151,22 @@ class RdsServiceTest {
                 new DbInstanceSettings(null, null, 7, "23:45-00:15", "wed:00:00-wed:00:30", null)));
         assertEquals("The backup window and maintenance window must not overlap.", wrapping.getMessage());
 
+        // a window given alone is checked against the one that will be in effect: on create the
+        // default, which is swapped for the alternate rather than refused since AWS would have
+        // picked a random window clear of the given one
+        rdsService.createDbInstance("alone", "postgres", "13", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, null, "00:30-01:00", null, null));
+        assertEquals(DbInstanceSettings.ALTERNATE_MAINTENANCE_WINDOW,
+                rdsService.getDbInstance("alone").getPreferredMaintenanceWindow());
+        rdsService.createDbInstance("alone2", "postgres", "13", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, null, null, "mon:04:30-mon:05:00", null));
+        assertEquals(DbInstanceSettings.ALTERNATE_BACKUP_WINDOW,
+                rdsService.getDbInstance("alone2").getPreferredBackupWindow());
+
         // AWS accepted a 40-day retention period, so it is not range-checked here
         rdsService.createDbInstance("mydb", "postgres", "13", "admin", "password", "dbname",
                 "db.t3.micro", 20, false, null, null, null, null, false, false, null,
@@ -5196,6 +5212,32 @@ class RdsServiceTest {
         assertTrue(stored.isStorageEncrypted());
         assertEquals("arn:aws:kms:us-east-1:123456789012:key/k1", stored.getKmsKeyId());
         assertEquals("sun:03:08-sun:03:38", stored.getPreferredMaintenanceWindow());
+    }
+
+    @Test
+    void modifyDbInstanceChecksAWindowAgainstTheStoredOther() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, 7, "01:00-01:30", "thu:10:00-thu:10:30", null));
+
+        AwsException maintenance = assertThrows(AwsException.class, () -> rdsService.modifyDbInstance(
+                "mydb", null, null, null, List.of(), null, null, null,
+                new DbInstanceSettings(null, null, null, null, "mon:01:15-mon:01:45", null)));
+        assertEquals("The backup window and maintenance window must not overlap.", maintenance.getMessage());
+        AwsException backup = assertThrows(AwsException.class, () -> rdsService.modifyDbInstance(
+                "mydb", null, null, null, List.of(), null, null, null,
+                new DbInstanceSettings(null, null, null, "10:15-10:45", null, null)));
+        assertEquals("The backup window and maintenance window must not overlap.", backup.getMessage());
+        assertEquals("01:00-01:30", rdsService.getDbInstance("mydb").getPreferredBackupWindow());
+        assertEquals("thu:10:00-thu:10:30", rdsService.getDbInstance("mydb").getPreferredMaintenanceWindow());
+
+        // both replaced at once: only the new pair has to be clear of each other
+        rdsService.modifyDbInstance("mydb", null, null, null, List.of(), null, null, null,
+                new DbInstanceSettings(null, null, null, "10:00-10:30", "mon:01:00-mon:01:30", null));
+        assertEquals("10:00-10:30", rdsService.getDbInstance("mydb").getPreferredBackupWindow());
+        assertEquals("mon:01:00-mon:01:30", rdsService.getDbInstance("mydb").getPreferredMaintenanceWindow());
     }
 
     @Test
