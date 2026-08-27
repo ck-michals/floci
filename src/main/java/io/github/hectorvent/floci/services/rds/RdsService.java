@@ -847,9 +847,11 @@ public class RdsService implements Resettable, ResourceProvider {
 
     /**
      * Gives an instance persisted before {@code engineIdentifier} existed the engine name AWS would
-     * report: for a cluster member, its cluster's (an Aurora member is aurora-postgresql, which the
-     * enum alone cannot say); for a standalone instance, the enum's name. Read from the cluster,
-     * which is authoritative — never guessed from the instance's own identifier.
+     * report, and only when that name is known for certain: a cluster member takes its cluster's
+     * stored name (an Aurora member is aurora-postgresql, which the enum alone cannot say); a
+     * standalone instance takes the enum's, since a standalone RDS instance is never Aurora. A
+     * member whose cluster predates the field too is left unset rather than written down as the
+     * enum — a persisted guess would outlive the code that could later tell.
      */
     void backfillInstanceEngineIdentifiers() {
         try {
@@ -859,18 +861,20 @@ public class RdsService implements Resettable, ResourceProvider {
                 }
                 String accountId = accountIdFromArn(instance.getDbInstanceArn());
                 String region = regionFromArn(instance.getDbInstanceArn());
-                String engineIdentifier = null;
+                String engineIdentifier;
                 String clusterId = instance.getDbClusterIdentifier();
                 if (clusterId != null && !clusterId.isBlank()) {
                     DbCluster cluster = findClusterForScope(accountId, region, clusterId);
-                    if (cluster != null && cluster.getEngineIdentifier() != null) {
-                        engineIdentifier = cluster.getEngineIdentifier().toLowerCase();
+                    if (cluster == null || cluster.getEngineIdentifier() == null
+                            || cluster.getEngineIdentifier().isBlank()) {
+                        LOG.debugv("Instance {0} keeps no engine name: its cluster {1} has none stored",
+                                instance.getDbInstanceIdentifier(), clusterId);
+                        continue;
                     }
-                }
-                if (engineIdentifier == null && instance.getEngine() != null) {
+                    engineIdentifier = cluster.getEngineIdentifier().toLowerCase();
+                } else if (instance.getEngine() != null) {
                     engineIdentifier = instance.getEngine().name().toLowerCase();
-                }
-                if (engineIdentifier == null) {
+                } else {
                     continue;
                 }
                 instance.setEngineIdentifier(engineIdentifier);

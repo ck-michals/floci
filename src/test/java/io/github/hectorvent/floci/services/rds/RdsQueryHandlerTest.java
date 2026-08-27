@@ -2030,6 +2030,8 @@ class RdsQueryHandlerTest {
         assertEquals(200, handler.handle("CreateDBSubnetGroup", p).getStatus());
         verify(service).createDbSubnetGroup("tagged", "d", List.of("subnet-aaa", "subnet-bbb"), null,
                 java.util.Map.of("Name", "tagged", "env", "tst"));
+    }
+
     // ──────────────────────────── RDS-family listing ────────────────────────────
 
     @Test

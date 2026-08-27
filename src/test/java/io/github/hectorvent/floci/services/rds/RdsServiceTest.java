@@ -4937,6 +4937,9 @@ class RdsServiceTest {
         // and the tags are what a restart reads back, not a side table
         assertEquals(Map.of("Name", "tagged", "env", "stg", "extra", "yes"),
                 rdsService.getDbSubnetGroup("tagged", "us-east-1").getTags());
+    }
+
+    @Test
     void createDbInstanceKeepsTheEngineNameTheRequestGave() {
         rdsService.createDbCluster("aurora", "aurora-postgresql", null, "admin", "secret99password",
                 null, false, null);
@@ -4982,9 +4985,26 @@ class RdsServiceTest {
         legacyStandalone.setStatus(DbInstanceStatus.AVAILABLE);
         instances.put("us-east-1::legacy-plain", legacyStandalone);
 
+        // a member of a cluster that predates the field itself: nothing certain to write, so
+        // nothing is written — the enum would persist postgres for what may be Aurora
+        DbCluster nameless = new DbCluster();
+        nameless.setDbClusterIdentifier("old-cluster");
+        nameless.setEngine(DatabaseEngine.POSTGRES);
+        nameless.setStatus(DbInstanceStatus.AVAILABLE);
+        nameless.setDbClusterArn("arn:aws:rds:us-east-1:123456789012:cluster:old-cluster");
+        clusters.put("us-east-1::old-cluster", nameless);
+        DbInstance orphanedMember = new DbInstance();
+        orphanedMember.setDbInstanceIdentifier("old-member");
+        orphanedMember.setEngine(DatabaseEngine.POSTGRES);
+        orphanedMember.setDbClusterIdentifier("old-cluster");
+        orphanedMember.setDbInstanceArn("arn:aws:rds:us-east-1:123456789012:db:old-member");
+        orphanedMember.setStatus(DbInstanceStatus.AVAILABLE);
+        instances.put("us-east-1::old-member", orphanedMember);
+
         service.restorePersistedRuntime();
 
         assertEquals("aurora-postgresql", service.getDbInstance("legacy-member").getEngineIdentifier());
         assertEquals("mariadb", service.getDbInstance("legacy-plain").getEngineIdentifier());
+        assertNull(service.getDbInstance("old-member").getEngineIdentifier());
     }
 }
