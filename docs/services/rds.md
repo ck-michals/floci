@@ -19,7 +19,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `ModifyDBInstance` | Update instance settings |
 | `RebootDBInstance` | Restart a database instance |
 | `DescribeOrderableDBInstanceOptions` | List deterministic instance class options |
-| `CreateDBSubnetGroup` | Create a DB subnet group |
+| `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
 | `DescribeDBSubnetGroups` | List DB subnet groups |
 | `ModifyDBSubnetGroup` | Update DB subnet group description and subnet list |
 | `DeleteDBSubnetGroup` | Delete a DB subnet group |

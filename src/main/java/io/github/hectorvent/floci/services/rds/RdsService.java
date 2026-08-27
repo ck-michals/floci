@@ -2258,6 +2258,15 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public DbSubnetGroup createDbSubnetGroup(String name, String description, List<String> subnetIds, String region) {
+        return createDbSubnetGroup(name, description, subnetIds, region, Map.of());
+    }
+
+    /**
+     * Tags given at create are stored with the group in the same write — a live account reads
+     * them back from ListTagsForResource straight after CreateDBSubnetGroup.
+     */
+    public DbSubnetGroup createDbSubnetGroup(String name, String description, List<String> subnetIds,
+                                             String region, Map<String, String> tags) {
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter DBSubnetGroupName.", 400);
         }
@@ -2274,6 +2283,9 @@ public class RdsService implements Resettable, ResourceProvider {
         }
 
         DbSubnetGroup group = buildSubnetGroup(name, description, subnetIds, effectiveRegion);
+        if (tags != null && !tags.isEmpty()) {
+            group.setTags(new LinkedHashMap<>(tags));
+        }
         putSubnetGroupForScope(currentAccountId(), effectiveRegion, name, group);
         return group;
     }

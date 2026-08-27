@@ -192,3 +192,30 @@ teardown() {
 
     aws_cmd docdb delete-db-cluster --db-cluster-identifier "$CLUSTER_ID" --skip-final-snapshot >/dev/null 2>&1 || true
 }
+
+@test "rds: tags given to create-db-subnet-group are readable back" {
+    VPC_ID=$(aws_cmd ec2 create-vpc --cidr-block 10.77.0.0/16 --query Vpc.VpcId --output text)
+    S1=$(aws_cmd ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block 10.77.1.0/24 --availability-zone us-east-1a --query Subnet.SubnetId --output text)
+    S2=$(aws_cmd ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block 10.77.2.0/24 --availability-zone us-east-1b --query Subnet.SubnetId --output text)
+    GROUP="bats-sng-$(unique_name)"
+
+    run aws_cmd rds create-db-subnet-group --db-subnet-group-name "$GROUP" --db-subnet-group-description d \
+        --subnet-ids "$S1" "$S2" --tags "Key=Name,Value=$GROUP" Key=env,Value=tst
+    assert_success
+    arn=$(json_get "$output" '.DBSubnetGroup.DBSubnetGroupArn')
+
+    run aws_cmd rds list-tags-for-resource --resource-name "$arn"
+    assert_success
+    assert_output --partial '"Key": "env"'
+    assert_output --partial "\"Value\": \"$GROUP\""
+
+    # the DocumentDB CLI reaches the same group through the same scope
+    run aws_cmd docdb list-tags-for-resource --resource-name "$arn"
+    assert_success
+    assert_output --partial '"Key": "env"'
+
+    aws_cmd rds delete-db-subnet-group --db-subnet-group-name "$GROUP" >/dev/null 2>&1 || true
+    aws_cmd ec2 delete-subnet --subnet-id "$S1" >/dev/null 2>&1 || true
+    aws_cmd ec2 delete-subnet --subnet-id "$S2" >/dev/null 2>&1 || true
+    aws_cmd ec2 delete-vpc --vpc-id "$VPC_ID" >/dev/null 2>&1 || true
+}

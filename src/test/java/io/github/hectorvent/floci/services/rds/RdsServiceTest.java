@@ -4920,4 +4920,22 @@ class RdsServiceTest {
         subnet.setAvailabilityZone(availabilityZone);
         return subnet;
     }
+
+    @Test
+    void createDbSubnetGroupStoresTheTagsItIsGiven() {
+        rdsService.createDbSubnetGroup("tagged", "d", List.of("subnet-default-a", "subnet-default-b"), "us-east-1",
+                Map.of("Name", "tagged", "env", "tst"));
+        String arn = "arn:aws:rds:us-east-1:123456789012:subgrp:tagged";
+
+        assertEquals(Map.of("Name", "tagged", "env", "tst"), rdsService.listTagsForResource(arn, "us-east-1"));
+
+        // later tag calls build on the create-time tags rather than replacing them
+        rdsService.addTagsToResource(arn, Map.of("env", "stg", "extra", "yes"), "us-east-1");
+        assertEquals(Map.of("Name", "tagged", "env", "stg", "extra", "yes"),
+                rdsService.listTagsForResource(arn, "us-east-1"));
+
+        // and the tags are what a restart reads back, not a side table
+        assertEquals(Map.of("Name", "tagged", "env", "stg", "extra", "yes"),
+                rdsService.getDbSubnetGroup("tagged", "us-east-1").getTags());
+    }
 }

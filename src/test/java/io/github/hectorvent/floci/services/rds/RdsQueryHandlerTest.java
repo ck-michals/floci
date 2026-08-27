@@ -633,7 +633,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void createDbSubnetGroup_passesSubnetMembersToService() {
-        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), null))
+        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), null, java.util.Map.of()))
                 .thenReturn(new DbSubnetGroup(
                         "sample-db-subnets", "test", "vpc-123", List.of("subnet-aaa", "subnet-bbb"),
                         Map.of("subnet-aaa", "us-east-1a", "subnet-bbb", "us-east-1b")));
@@ -645,7 +645,7 @@ class RdsQueryHandlerTest {
         p.add("SubnetIds.SubnetIdentifier.2", "subnet-bbb");
         Response response = handler.handle("CreateDBSubnetGroup", p);
 
-        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), null);
+        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), null, java.util.Map.of());
         String body = (String) response.getEntity();
         assertEquals(200, response.getStatus());
         assertTrue(body.contains("<DBSubnetGroupName>sample-db-subnets</DBSubnetGroupName>"));
@@ -657,7 +657,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void createDbSubnetGroupPassesRequestRegionToService() {
-        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), "us-west-2"))
+        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), "us-west-2", java.util.Map.of()))
                 .thenReturn(new DbSubnetGroup(
                         "sample-db-subnets", "test", "vpc-123", List.of("subnet-aaa", "subnet-bbb"),
                         Map.of("subnet-aaa", "us-west-2a", "subnet-bbb", "us-west-2b")));
@@ -671,7 +671,7 @@ class RdsQueryHandlerTest {
         Response response = handler.handle("CreateDBSubnetGroup", p, "us-west-2");
 
         assertEquals(200, response.getStatus());
-        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), "us-west-2");
+        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), "us-west-2", java.util.Map.of());
     }
 
     @Test
@@ -862,7 +862,7 @@ class RdsQueryHandlerTest {
         group.setVpcId("vpc-12345678");
         group.setSubnetIds(List.of("subnet-a", "subnet-b"));
         group.setSubnetAvailabilityZones(Map.of("subnet-a", "us-east-1a", "subnet-b", "us-east-1b"));
-        when(service.createDbSubnetGroup("my-subnet-group", "test subnet group", List.of("subnet-a", "subnet-b"), null))
+        when(service.createDbSubnetGroup("my-subnet-group", "test subnet group", List.of("subnet-a", "subnet-b"), null, java.util.Map.of()))
                 .thenReturn(group);
 
         MultivaluedMap<String, String> p = params();
@@ -2003,5 +2003,28 @@ class RdsQueryHandlerTest {
         c.setEngineVersion("15");
         c.setMasterUsername("admin");
         return c;
+    }
+
+    @Test
+    void createDbSubnetGroup_passesCreateTagsToService() {
+        DbSubnetGroup group = new DbSubnetGroup();
+        group.setDbSubnetGroupName("tagged");
+        group.setDbSubnetGroupArn("arn:aws:rds:us-east-1:123456789012:subgrp:tagged");
+        when(service.createDbSubnetGroup(eq("tagged"), eq("d"), eq(List.of("subnet-aaa", "subnet-bbb")), isNull(),
+                eq(java.util.Map.of("Name", "tagged", "env", "tst")))).thenReturn(group);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSubnetGroupName", "tagged");
+        p.add("DBSubnetGroupDescription", "d");
+        p.add("SubnetIds.SubnetIdentifier.1", "subnet-aaa");
+        p.add("SubnetIds.SubnetIdentifier.2", "subnet-bbb");
+        p.add("Tags.Tag.1.Key", "Name");
+        p.add("Tags.Tag.1.Value", "tagged");
+        p.add("Tags.Tag.2.Key", "env");
+        p.add("Tags.Tag.2.Value", "tst");
+
+        assertEquals(200, handler.handle("CreateDBSubnetGroup", p).getStatus());
+        verify(service).createDbSubnetGroup("tagged", "d", List.of("subnet-aaa", "subnet-bbb"), null,
+                java.util.Map.of("Name", "tagged", "env", "tst"));
     }
 }

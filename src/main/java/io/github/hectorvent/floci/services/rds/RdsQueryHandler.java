@@ -304,7 +304,8 @@ public class RdsQueryHandler {
         String description = params.getFirst("DBSubnetGroupDescription");
         List<String> subnetIds = memberList(params, "SubnetIds");
         try {
-            DbSubnetGroup group = service.createDbSubnetGroup(name, description, subnetIds, region);
+            DbSubnetGroup group = service.createDbSubnetGroup(name, description, subnetIds, region,
+                    parseTags(params));
             return Response.ok(AwsQueryResponse.envelope("CreateDBSubnetGroup",
                     AwsNamespaces.RDS, dbSubnetGroupXml(group))).build();
         } catch (AwsException e) {
