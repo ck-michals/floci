@@ -5173,20 +5173,30 @@ class RdsServiceTest {
                 new DbInstanceSettings(null, null, 7, "23:45-00:15", "mon:00:15-mon:00:45", null));
 
         // a window given alone is checked against the one that will be in effect: on create the
-        // default, which is swapped for the alternate rather than refused since AWS would have
-        // picked a random window clear of the given one
+        // default, replaced by a window starting where the given one ends rather than refused,
+        // since AWS would have picked a random window clear of the given one
         rdsService.createDbInstance("alone", "postgres", "13", "admin", "password", "dbname",
                 "db.t3.micro", 20, false, null, null, null, null, false, false, null,
                 Map.of(), List.of(), null, null, true,
                 new DbInstanceSettings(null, null, null, "00:30-01:00", null, null));
-        assertEquals(DbInstanceSettings.ALTERNATE_MAINTENANCE_WINDOW,
-                rdsService.getDbInstance("alone").getPreferredMaintenanceWindow());
+        assertEquals("mon:01:00-mon:01:30", rdsService.getDbInstance("alone").getPreferredMaintenanceWindow());
+        // a long daily window that no fixed alternate could be clear of
+        rdsService.createDbInstance("long", "postgres", "13", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, null, "00:00-07:00", null, null));
+        assertEquals("mon:07:00-mon:07:30", rdsService.getDbInstance("long").getPreferredMaintenanceWindow());
+        // ending near midnight rolls the maintenance window onto the next day
+        rdsService.createDbInstance("midnight", "postgres", "13", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, null, "02:00-23:45", null, null));
+        assertEquals("mon:23:45-tue:00:15", rdsService.getDbInstance("midnight").getPreferredMaintenanceWindow());
         rdsService.createDbInstance("alone2", "postgres", "13", "admin", "password", "dbname",
                 "db.t3.micro", 20, false, null, null, null, null, false, false, null,
                 Map.of(), List.of(), null, null, true,
                 new DbInstanceSettings(null, null, null, null, "mon:04:30-mon:05:00", null));
-        assertEquals(DbInstanceSettings.ALTERNATE_BACKUP_WINDOW,
-                rdsService.getDbInstance("alone2").getPreferredBackupWindow());
+        assertEquals("05:00-05:30", rdsService.getDbInstance("alone2").getPreferredBackupWindow());
 
         // AWS accepted a 40-day retention period, so it is not range-checked here
         rdsService.createDbInstance("mydb", "postgres", "13", "admin", "password", "dbname",

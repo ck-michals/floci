@@ -26,15 +26,9 @@ public record DbInstanceSettings(Boolean storageEncrypted,
     private static final int MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY;
     private static final int MINIMUM_WINDOW_MINUTES = 30;
 
-    /**
-     * Where AWS picks a random 30-minute window, Floci picks these; the alternates are used when a
-     * window given on create overlaps the default of the other kind, since AWS would have picked a
-     * random window clear of it.
-     */
+    /** Where AWS picks a random 30-minute window, Floci picks these. */
     public static final String DEFAULT_BACKUP_WINDOW = "04:00-06:00";
     public static final String DEFAULT_MAINTENANCE_WINDOW = "mon:00:00-mon:03:00";
-    public static final String ALTERNATE_BACKUP_WINDOW = "06:30-07:00";
-    public static final String ALTERNATE_MAINTENANCE_WINDOW = "sun:06:30-sun:07:00";
 
     public static DbInstanceSettings defaults() {
         return new DbInstanceSettings(null, null, null, null, null, null);
@@ -66,6 +60,32 @@ public record DbInstanceSettings(Boolean storageEncrypted,
     /** Whether a daily backup window and a weekly maintenance window share any minute. */
     public static boolean windowsOverlap(String backupWindow, String maintenanceWindow) {
         return overlap(parseBackupWindow(backupWindow), parseMaintenanceWindow(maintenanceWindow));
+    }
+
+    /**
+     * A 30-minute maintenance window that starts the minute the given daily backup window ends,
+     * so it is clear of it on every day — what AWS's random pick achieves when only the backup
+     * window is given.
+     */
+    public static String maintenanceWindowAfter(String backupWindow) {
+        int end = parseBackupWindow(backupWindow)[1] % MINUTES_PER_DAY;
+        return weeklyWindow(end, end + MINIMUM_WINDOW_MINUTES);
+    }
+
+    /** A 30-minute daily backup window starting the minute the given maintenance window ends. */
+    public static String backupWindowAfter(String maintenanceWindow) {
+        int end = parseMaintenanceWindow(maintenanceWindow)[1] % MINUTES_PER_DAY;
+        return time(end) + "-" + time(end + MINIMUM_WINDOW_MINUTES);
+    }
+
+    private static String weeklyWindow(int startMinuteOfDay, int endMinuteOfDay) {
+        return DAYS.get(0) + ":" + time(startMinuteOfDay) + "-"
+                + DAYS.get(endMinuteOfDay / MINUTES_PER_DAY) + ":" + time(endMinuteOfDay);
+    }
+
+    private static String time(int minuteOfDay) {
+        int m = minuteOfDay % MINUTES_PER_DAY;
+        return String.format("%02d:%02d", m / 60, m % 60);
     }
 
     public static AwsException overlappingWindows() {

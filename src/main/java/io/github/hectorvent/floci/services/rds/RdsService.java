@@ -1106,8 +1106,9 @@ public class RdsService implements Resettable, ResourceProvider {
     /**
      * The windows that will be in effect after the request, checked against each other the way a
      * live account checks them. On create ({@code current} null) a window given alone is paired
-     * with a default, and with the alternate default when it would overlap the usual one — AWS
-     * picks a random window clear of the given one. On modify the counterpart is the instance's.
+     * with the default, or with a window starting where the given one ends when the default would
+     * overlap it — AWS picks a random window clear of the given one. On modify the counterpart is
+     * the instance's.
      */
     private static DbInstanceSettings withEffectiveWindows(DbInstanceSettings settings, DbInstance current) {
         String backup = settings.preferredBackupWindow();
@@ -1118,13 +1119,13 @@ public class RdsService implements Resettable, ResourceProvider {
             if (!backupGiven) {
                 backup = maintenanceGiven && DbInstanceSettings.windowsOverlap(
                         DbInstanceSettings.DEFAULT_BACKUP_WINDOW, maintenance)
-                        ? DbInstanceSettings.ALTERNATE_BACKUP_WINDOW
+                        ? DbInstanceSettings.backupWindowAfter(maintenance)
                         : DbInstanceSettings.DEFAULT_BACKUP_WINDOW;
             }
             if (!maintenanceGiven) {
                 maintenance = backupGiven && DbInstanceSettings.windowsOverlap(
                         backup, DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW)
-                        ? DbInstanceSettings.ALTERNATE_MAINTENANCE_WINDOW
+                        ? DbInstanceSettings.maintenanceWindowAfter(backup)
                         : DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW;
             }
         } else {
