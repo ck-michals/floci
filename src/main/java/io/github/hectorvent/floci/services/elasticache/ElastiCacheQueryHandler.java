@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
+import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
 import io.github.hectorvent.floci.services.elasticache.proxy.SigV4Validator;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -105,11 +106,32 @@ public class ElastiCacheQueryHandler {
 
         try {
             ReplicationGroup group = service.createReplicationGroup(
-                    groupId, description != null ? description : "", authMode, authToken, region);
+                    groupId, description != null ? description : "", authMode, authToken, region,
+                    replicationGroupSettings(params), parseTags(params));
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private static ReplicationGroupSettings replicationGroupSettings(MultivaluedMap<String, String> params) {
+        String atRest = params.getFirst("AtRestEncryptionEnabled");
+        return new ReplicationGroupSettings(
+                atRest == null ? null : Boolean.parseBoolean(atRest),
+                params.getFirst("KmsKeyId"),
+                optionalInt(params.getFirst("SnapshotRetentionLimit")),
+                params.getFirst("SnapshotWindow"));
+    }
+
+    private static Integer optionalInt(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue", "Value " + value + " is not a valid integer.", 400);
         }
     }
 
@@ -153,9 +175,12 @@ public class ElastiCacheQueryHandler {
         List<String> userIdsToAdd = extractMemberList(params, "UserGroupIdsToAdd.member.");
         List<String> userIdsToRemove = extractMemberList(params, "UserGroupIdsToRemove.member.");
         try {
+            // AtRestEncryptionEnabled and KmsKeyId are fixed at create and not in the modify shape
+            ReplicationGroupSettings settings = new ReplicationGroupSettings(null, null,
+                    optionalInt(params.getFirst("SnapshotRetentionLimit")), params.getFirst("SnapshotWindow"));
             ReplicationGroup group = service.modifyReplicationGroup(groupId,
                     userIdsToAdd.isEmpty() ? null : userIdsToAdd,
-                    userIdsToRemove.isEmpty() ? null : userIdsToRemove);
+                    userIdsToRemove.isEmpty() ? null : userIdsToRemove, settings);
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("ModifyReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {
@@ -478,6 +503,15 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             }
 
             Map<String, String> tags = Map.of();
+            if ("replicationgroup".equals(arn[5])) {
+                // the store keys groups by id alone; the record must be the one the ARN names
+                ReplicationGroup group = service.getReplicationGroup(arn[6]);
+                if (group.getArn() != null && !group.getArn().equalsIgnoreCase(resourceName)) {
+                    throw new AwsException("ReplicationGroupNotFoundFault",
+                            "Replication group " + arn[6] + " not found.", 404);
+                }
+                tags = group.getTags();
+            }
             if ("subnetgroup".equals(arn[5])) {
                 tags = service.describeCacheSubnetGroups(arn[6]).getFirst().getTags();
             }
@@ -611,11 +645,19 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                   .elem("Status", g.getStatus().name().toLowerCase())
                   .elem("AuthTokenEnabled", authTokenEnabled)
                   .elem("TransitEncryptionEnabled", authTokenEnabled)
-                  .elem("AtRestEncryptionEnabled", false)
+                  .elem("AtRestEncryptionEnabled", g.isAtRestEncryptionEnabled())
                   .elem("ClusterEnabled", false)
                   .elem("MultiAZ", "disabled")
                   .elem("AutomaticFailover", "disabled")
-                  .elem("SnapshotRetentionLimit", 0L);
+                  .elem("SnapshotRetentionLimit", (long) g.getSnapshotRetentionLimit());
+        xml.elem("SnapshotWindow", g.getSnapshotWindow() != null
+                ? g.getSnapshotWindow() : ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW);
+        if (g.getKmsKeyId() != null) {
+            xml.elem("KmsKeyId", g.getKmsKeyId());
+        }
+        if (g.getArn() != null) {
+            xml.elem("ARN", g.getArn());
+        }
         if (ep != null) {
             xml.start("ConfigurationEndpoint")
                .elem("Address", ep.address())

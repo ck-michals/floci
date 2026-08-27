@@ -4,6 +4,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 
 @RegisterForReflection
@@ -20,6 +22,11 @@ public class ReplicationGroup {
     private Set<String> associatedUserIds = new HashSet<>();
     private String arn;
     private String region;
+    private boolean atRestEncryptionEnabled;
+    private String kmsKeyId;
+    private int snapshotRetentionLimit;
+    private String snapshotWindow;
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     // Transient fields — not persisted, restored on container restart
     private transient String containerId;
@@ -77,6 +84,21 @@ public class ReplicationGroup {
 
     public int getContainerPort() { return containerPort; }
     public void setContainerPort(int containerPort) { this.containerPort = containerPort; }
+
+    public boolean isAtRestEncryptionEnabled() { return atRestEncryptionEnabled; }
+    public void setAtRestEncryptionEnabled(boolean atRestEncryptionEnabled) { this.atRestEncryptionEnabled = atRestEncryptionEnabled; }
+
+    public String getKmsKeyId() { return kmsKeyId; }
+    public void setKmsKeyId(String kmsKeyId) { this.kmsKeyId = kmsKeyId; }
+
+    public int getSnapshotRetentionLimit() { return snapshotRetentionLimit; }
+    public void setSnapshotRetentionLimit(int snapshotRetentionLimit) { this.snapshotRetentionLimit = snapshotRetentionLimit; }
+
+    public String getSnapshotWindow() { return snapshotWindow; }
+    public void setSnapshotWindow(String snapshotWindow) { this.snapshotWindow = snapshotWindow; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags == null ? new LinkedHashMap<>() : tags; }
 
     public String getArn() { return arn; }
     public void setArn(String arn) { this.arn = arn; }

@@ -6,6 +6,10 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
@@ -15,11 +19,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -36,15 +42,17 @@ import static org.mockito.Mockito.when;
 class ElastiCacheServiceTest {
 
     private ElastiCacheService service;
+    private KmsService kmsService;
     private ElastiCacheContainerManager containerManager;
     private ElastiCacheProxyManager proxyManager;
+    private EmulatorConfig config;
 
     @BeforeEach
     void setUp() {
         containerManager = mock(ElastiCacheContainerManager.class);
         proxyManager = mock(ElastiCacheProxyManager.class);
         StorageFactory storageFactory = mock(StorageFactory.class);
-        EmulatorConfig config = mock(EmulatorConfig.class);
+        config = mock(EmulatorConfig.class);
 
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.ElastiCacheServiceConfig ecConfig = mock(EmulatorConfig.ElastiCacheServiceConfig.class);
@@ -60,8 +68,11 @@ class ElastiCacheServiceTest {
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
         doNothing().when(proxyManager).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
         Ec2Service ec2Service = org.mockito.Mockito.mock(Ec2Service.class);
+        kmsService = org.mockito.Mockito.mock(KmsService.class);
+        when(kmsService.describeKey(any(), any())).thenThrow(
+                new AwsException("NotFoundException", "Key not found", 404));
         service = new ElastiCacheService(containerManager, proxyManager, storageFactory, config,
-                ec2Service, new RegionResolver("us-east-1", "000000000000"));
+                ec2Service, new RegionResolver("us-east-1", "000000000000"), kmsService);
     }
 
     @Test
@@ -88,7 +99,8 @@ class ElastiCacheServiceTest {
         doNothing().when(pm).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
         ElastiCacheService svc = new ElastiCacheService(cm, pm, sf, cfg,
                 org.mockito.Mockito.mock(Ec2Service.class),
-                new RegionResolver("us-east-1", "000000000000"));
+                new RegionResolver("us-east-1", "000000000000"),
+                org.mockito.Mockito.mock(KmsService.class));
 
         svc.createReplicationGroup("g1", "d", AuthMode.PASSWORD, null, "us-east-1");
 
@@ -220,5 +232,137 @@ class ElastiCacheServiceTest {
         firstRequest.join(5000);
 
         assertEquals("grp", service.getReplicationGroup("grp").getReplicationGroupId());
+    }
+
+    private static final String KEY_ARN = "arn:aws:kms:us-east-1:000000000000:key/k1";
+
+    private KmsKey knownKey(String... forms) {
+        KmsKey key = new KmsKey();
+        key.setKeyId("k1");
+        key.setArn(KEY_ARN);
+        key.setEnabled(true);
+        key.setKeyState("Enabled");
+        for (String form : forms) {
+            org.mockito.Mockito.doReturn(key).when(kmsService).describeKey(form, "us-east-1");
+        }
+        return key;
+    }
+
+    @Test
+    void createReplicationGroupStoresEncryptionSnapshotSettingsAndTags() {
+        knownKey("alias/cache");
+        ReplicationGroup group = service.createReplicationGroup("g1", "d", AuthMode.NO_AUTH, null, "us-east-1",
+                new ReplicationGroupSettings(true, "alias/cache", 7, "06:30-07:30"),
+                Map.of("Name", "g1", "env", "tst"));
+
+        ReplicationGroup stored = service.getReplicationGroup("g1");
+        assertTrue(stored.isAtRestEncryptionEnabled());
+        assertEquals(KEY_ARN, stored.getKmsKeyId());
+        assertEquals(7, stored.getSnapshotRetentionLimit());
+        assertEquals("06:30-07:30", stored.getSnapshotWindow());
+        assertEquals(Map.of("Name", "g1", "env", "tst"), stored.getTags());
+        assertEquals("arn:aws:elasticache:us-east-1:000000000000:replicationgroup:g1", group.getArn());
+    }
+
+    @Test
+    void createReplicationGroupWithoutSettingsKeepsAwsDefaults() {
+        service.createReplicationGroup("g1", "d", AuthMode.NO_AUTH, null, "us-east-1");
+        ReplicationGroup stored = service.getReplicationGroup("g1");
+        assertFalse(stored.isAtRestEncryptionEnabled());
+        assertNull(stored.getKmsKeyId());
+        assertEquals(0, stored.getSnapshotRetentionLimit());
+        assertTrue(stored.getTags().isEmpty());
+        assertEquals(ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW, stored.getSnapshotWindow());
+    }
+
+    @Test
+    void createReplicationGroupRejectsAKeyItCannotUseBeforeStartingAContainer() {
+        AwsException missing = assertThrows(AwsException.class, () -> service.createReplicationGroup(
+                "g1", "d", AuthMode.NO_AUTH, null, "us-east-1",
+                new ReplicationGroupSettings(true, "alias/does-not-exist", null, null), Map.of()));
+        assertEquals("InvalidParameterValue", missing.getErrorCode());
+        assertEquals("KMS key does not exist with key id: alias/does-not-exist", missing.getMessage());
+        assertThrows(AwsException.class, () -> service.getReplicationGroup("g1"));
+        org.mockito.Mockito.verify(containerManager, org.mockito.Mockito.never()).start(anyString(), anyString());
+
+        AwsException combination = assertThrows(AwsException.class, () -> service.createReplicationGroup(
+                "g1", "d", AuthMode.NO_AUTH, null, "us-east-1",
+                new ReplicationGroupSettings(false, KEY_ARN, null, null), Map.of()));
+        assertEquals("InvalidParameterCombination", combination.getErrorCode());
+        assertEquals("Please enable encryption at rest to use Customer Managed CMK", combination.getMessage());
+
+        AwsException retention = assertThrows(AwsException.class, () -> service.createReplicationGroup(
+                "g1", "d", AuthMode.NO_AUTH, null, "us-east-1",
+                new ReplicationGroupSettings(null, null, 36, null), Map.of()));
+        assertEquals("Invalid snapshot retention limit: 36. Retention limit must be between 0 and 35.", retention.getMessage());
+        AwsException window = assertThrows(AwsException.class, () -> service.createReplicationGroup(
+                "g1", "d", AuthMode.NO_AUTH, null, "us-east-1",
+                new ReplicationGroupSettings(null, null, null, "25:00-26:00"), Map.of()));
+        assertEquals("Invalid backup window format. Should be specified as a range hh24:mi-hh24:mi (24H Clock UTC). Example: 03:15-08:15", window.getMessage());
+        AwsException shortWindow = assertThrows(AwsException.class, () -> service.createReplicationGroup(
+                "g1", "d", AuthMode.NO_AUTH, null, "us-east-1",
+                new ReplicationGroupSettings(null, null, null, "05:00-05:30"), Map.of()));
+        assertEquals("Snapshot window must be at least 60 minutes.", shortWindow.getMessage());
+    }
+
+    @Test
+    void modifyReplicationGroupChangesSnapshotSettingsAndKeepsEncryption() {
+        knownKey(KEY_ARN);
+        service.createReplicationGroup("g1", "d", AuthMode.NO_AUTH, null, "us-east-1",
+                new ReplicationGroupSettings(true, KEY_ARN, 7, "06:30-07:30"), Map.of());
+
+        service.modifyReplicationGroup("g1", null, null, new ReplicationGroupSettings(null, null, 3, "01:00-02:00"));
+
+        ReplicationGroup stored = service.getReplicationGroup("g1");
+        assertEquals(3, stored.getSnapshotRetentionLimit());
+        assertEquals("01:00-02:00", stored.getSnapshotWindow());
+        assertTrue(stored.isAtRestEncryptionEnabled());
+        assertEquals(KEY_ARN, stored.getKmsKeyId());
+
+        assertThrows(AwsException.class, () -> service.modifyReplicationGroup("g1", null, null,
+                new ReplicationGroupSettings(null, null, null, "25:00-26:00")));
+        assertEquals("01:00-02:00", service.getReplicationGroup("g1").getSnapshotWindow());
+    }
+
+    @Test
+    void modifyReplicationGroupCannotWriteAGroupBackAfterDelete() throws Exception {
+        // modify has read the group, delete removes it, modify writes its copy back — the store is
+        // held inside modify's put so the delete can be run in exactly that window
+        PausingStorageBackend<ReplicationGroup> pausing = new PausingStorageBackend<>(new InMemoryStorage<>());
+        StorageFactory factory = org.mockito.Mockito.mock(StorageFactory.class);
+        when(factory.create(anyString(), eq("elasticache-groups.json"), any()))
+                .thenAnswer(inv -> new AccountAwareStorageBackend<>(pausing, null, "000000000000"));
+        when(factory.create(anyString(), org.mockito.ArgumentMatchers.argThat(f -> !"elasticache-groups.json".equals(f)), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, factory, config,
+                org.mockito.Mockito.mock(Ec2Service.class), new RegionResolver("us-east-1", "000000000000"), kmsService);
+        svc.createReplicationGroup("g1", "d", AuthMode.NO_AUTH, null, "us-east-1");
+
+        pausing.pauseOn(PausingStorageBackend.Call.PUT, "g1");
+        java.util.concurrent.atomic.AtomicReference<Throwable> modifyOutcome = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread modify = new Thread(() -> {
+            try {
+                svc.modifyReplicationGroup("g1", null, null, new ReplicationGroupSettings(null, null, 3, null));
+            } catch (Throwable t) {
+                modifyOutcome.set(t);
+            }
+        });
+        modify.start();
+        pausing.awaitReached();
+
+        Thread delete = new Thread(() -> svc.deleteReplicationGroup("g1"));
+        delete.start();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (delete.getState() != Thread.State.BLOCKED && delete.getState() != Thread.State.TERMINATED) {
+            assertTrue(System.nanoTime() < deadline, "delete neither ran nor queued");
+            Thread.onSpinWait();
+        }
+        pausing.release();
+        modify.join(5000);
+        delete.join(5000);
+
+        assertNull(modifyOutcome.get(), "modify completed before the delete");
+        assertThrows(AwsException.class, () -> svc.getReplicationGroup("g1"),
+                "the deleted group must not come back from the modify");
     }
 }

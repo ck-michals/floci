@@ -29,6 +29,9 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -53,6 +56,7 @@ public class ElastiCacheService implements ResourceProvider {
     private final ElastiCacheContainerManager containerManager;
     private final ElastiCacheProxyManager proxyManager;
     private final EmulatorConfig config;
+    private final KmsService kmsService;
     private final Ec2Service ec2Service;
     private final RegionResolver regionResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
@@ -65,7 +69,9 @@ public class ElastiCacheService implements ResourceProvider {
                               StorageFactory storageFactory,
                               EmulatorConfig config,
                               Ec2Service ec2Service,
-                              RegionResolver regionResolver) {
+                              RegionResolver regionResolver,
+                              KmsService kmsService) {
+        this.kmsService = kmsService;
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.config = config;
@@ -83,6 +89,18 @@ public class ElastiCacheService implements ResourceProvider {
 
     public ReplicationGroup createReplicationGroup(String groupId, String description,
                                                    AuthMode authMode, String authToken, String region) {
+        return createReplicationGroup(groupId, description, authMode, authToken, region,
+                ReplicationGroupSettings.defaults(), Map.of());
+    }
+
+    public ReplicationGroup createReplicationGroup(String groupId, String description,
+                                                   AuthMode authMode, String authToken, String region,
+                                                   ReplicationGroupSettings settings,
+                                                   Map<String, String> tags) {
+        settings.validate();
+        // resolved with the other validations, before a port is taken or a container started
+        ReplicationGroupSettings resolvedSettings =
+                settings.withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), region));
         if (groups.get(groupId).isPresent()) {
             throw new AwsException("ReplicationGroupAlreadyExistsFault",
                     "Replication group " + groupId + " already exists.", 400);
@@ -116,6 +134,11 @@ public class ElastiCacheService implements ResourceProvider {
                 group.setAuthToken(authToken);
                 group.setArn(regionResolver.buildArn("elasticache", region, "replicationgroup:" + groupId));
                 group.setRegion(region);
+                group.setSnapshotWindow(ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW);
+                resolvedSettings.applyTo(group);
+                if (tags != null && !tags.isEmpty()) {
+                    group.setTags(new LinkedHashMap<>(tags));
+                }
 
                 proxyManager.startProxy(groupId, authMode, proxyPort,
                         handle.getHost(), handle.getPort(),
@@ -173,41 +196,85 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     public void deleteReplicationGroup(String groupId) {
-        ReplicationGroup group = groups.get(groupId).orElseThrow(() ->
-                new AwsException("ReplicationGroupNotFoundFault",
-                        "Replication group " + groupId + " not found.", 404));
+        // one monitor per group for delete and modify: a modify's read-modify-write could
+        // otherwise write the group back after this removed it
+        synchronized (lockFor("rg:" + groupId)) {
+            ReplicationGroup group = groups.get(groupId).orElseThrow(() ->
+                    new AwsException("ReplicationGroupNotFoundFault",
+                            "Replication group " + groupId + " not found.", 404));
 
-        group.setStatus(ReplicationGroupStatus.DELETING);
-        groups.put(groupId, group);
+            group.setStatus(ReplicationGroupStatus.DELETING);
+            groups.put(groupId, group);
 
-        proxyManager.stopProxy(groupId);
+            proxyManager.stopProxy(groupId);
 
-        if (group.getContainerId() != null) {
-            containerManager.stop(new ElastiCacheContainerHandle(
-                    group.getContainerId(), groupId, group.getContainerHost(), group.getContainerPort()));
+            if (group.getContainerId() != null) {
+                containerManager.stop(new ElastiCacheContainerHandle(
+                        group.getContainerId(), groupId, group.getContainerHost(), group.getContainerPort()));
+            }
+
+            releaseProxyPort(group.getProxyPort());
+            groups.delete(groupId);
+            LOG.infov("Replication group {0} deleted", groupId);
         }
-
-        releaseProxyPort(group.getProxyPort());
-        groups.delete(groupId);
-        LOG.infov("Replication group {0} deleted", groupId);
     }
 
     public ReplicationGroup modifyReplicationGroup(String groupId, List<String> userIdsToAdd,
                                                     List<String> userIdsToRemove) {
-        ReplicationGroup group = getReplicationGroup(groupId);
+        return modifyReplicationGroup(groupId, userIdsToAdd, userIdsToRemove,
+                ReplicationGroupSettings.unchanged());
+    }
 
-        if (userIdsToAdd != null) {
-            for (String userId : userIdsToAdd) {
-                getUser(userId); // validate user exists
-                group.getAssociatedUserIds().add(userId);
+    public ReplicationGroup modifyReplicationGroup(String groupId, List<String> userIdsToAdd,
+                                                    List<String> userIdsToRemove,
+                                                    ReplicationGroupSettings settings) {
+        settings.validate();
+        synchronized (lockFor("rg:" + groupId)) {
+            ReplicationGroup group = getReplicationGroup(groupId);
+            settings.applyTo(group);
+
+            if (userIdsToAdd != null) {
+                for (String userId : userIdsToAdd) {
+                    getUser(userId); // validate user exists
+                    group.getAssociatedUserIds().add(userId);
+                }
             }
-        }
-        if (userIdsToRemove != null) {
-            group.getAssociatedUserIds().removeAll(userIdsToRemove);
-        }
+            if (userIdsToRemove != null) {
+                group.getAssociatedUserIds().removeAll(userIdsToRemove);
+            }
 
-        groups.put(groupId, group);
-        return group;
+            groups.put(groupId, group);
+            return group;
+        }
+    }
+
+    /**
+     * A live account takes the key as a key id, key ARN or alias and reports the key ARN on the
+     * group; a key it cannot use is one fault whatever the reason.
+     */
+    private String resolveKmsKeyArn(String kmsKeyId, String region) {
+        if (kmsKeyId == null || kmsKeyId.isBlank()) {
+            return null;
+        }
+        if (kmsService == null) {
+            throw new IllegalStateException("ElastiCacheService was built without a KmsService; "
+                    + "a KmsKeyId cannot be resolved");
+        }
+        KmsKey key;
+        try {
+            key = kmsService.describeKey(kmsKeyId, region);
+        } catch (AwsException e) {
+            throw kmsKeyNotAccessible(kmsKeyId);
+        }
+        if (!key.isEnabled() || "PendingDeletion".equals(key.getKeyState())) {
+            throw kmsKeyNotAccessible(kmsKeyId);
+        }
+        return key.getArn();
+    }
+
+    private static AwsException kmsKeyNotAccessible(String kmsKeyId) {
+        return new AwsException("InvalidParameterValue",
+                "KMS key does not exist with key id: " + kmsKeyId, 400);
     }
 
     public ElastiCacheUser createUser(String userId, String userName, AuthMode authMode,
