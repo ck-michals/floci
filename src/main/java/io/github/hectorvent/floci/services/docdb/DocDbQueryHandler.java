@@ -111,6 +111,19 @@ public class DocDbQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("DescribeDBClusters", AwsNamespaces.RDS, xml.build())).build();
     }
 
+    /**
+     * The rows the list form of DescribeDBClusters would return, for the RDS-family listing that
+     * {@code RdsQueryHandler} assembles: a live account lists DocumentDB clusters from the RDS
+     * endpoint and the DocumentDB endpoint alike.
+     */
+    public List<String> clusterRowsXml(String filterId) {
+        return service.listDbClusters(filterId).stream().map(this::clusterInnerXml).toList();
+    }
+
+    public List<String> instanceRowsXml(String filterId) {
+        return service.listDbInstances(filterId).stream().map(this::instanceInnerXml).toList();
+    }
+
     private Response handleDescribeGlobalClusters(MultivaluedMap<String, String> params) {
         // Global clusters are not modeled; an empty list is what completes the provider's read.
         // Real SDKs sign DocumentDB with the "rds" scope and land on RdsQueryHandler instead;

@@ -218,4 +218,30 @@ teardown() {
     aws_cmd ec2 delete-subnet --subnet-id "$S1" >/dev/null 2>&1 || true
     aws_cmd ec2 delete-subnet --subnet-id "$S2" >/dev/null 2>&1 || true
     aws_cmd ec2 delete-vpc --vpc-id "$VPC_ID" >/dev/null 2>&1 || true
+@test "docdb: a DocumentDB cluster is listed by describe-db-clusters on both endpoints" {
+    CLUSTER_ID="bats-docdb-list-$(unique_name)"
+    aws_cmd docdb create-db-cluster --db-cluster-identifier "$CLUSTER_ID" \
+        --engine docdb --master-username docdbadmin --master-user-password "secret99password" >/dev/null
+
+    run aws_cmd docdb describe-db-clusters --query 'DBClusters[].DBClusterIdentifier'
+    assert_success
+    assert_output --partial "$CLUSTER_ID"
+
+    run aws_cmd rds describe-db-clusters --query 'DBClusters[].DBClusterIdentifier'
+    assert_success
+    assert_output --partial "$CLUSTER_ID"
+
+    run aws_cmd docdb describe-db-clusters --filters Name=engine,Values=docdb --query 'DBClusters[].DBClusterIdentifier'
+    assert_success
+    assert_output --partial "$CLUSTER_ID"
+
+    run aws_cmd rds describe-db-clusters --filters Name=engine,Values=aurora-postgresql --query 'DBClusters[].DBClusterIdentifier'
+    assert_success
+    refute_output --partial "$CLUSTER_ID"
+
+    run aws_cmd rds describe-db-clusters --filters Name=engine,Values=nothing
+    assert_failure
+    assert_output --partial 'Unrecognized engine name: nothing'
+
+    aws_cmd docdb delete-db-cluster --db-cluster-identifier "$CLUSTER_ID" --skip-final-snapshot >/dev/null 2>&1 || true
 }
