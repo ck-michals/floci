@@ -231,13 +231,16 @@ public class ElastiCacheService implements ResourceProvider {
         settings.validate();
         synchronized (lockFor("rg:" + groupId)) {
             ReplicationGroup group = getReplicationGroup(groupId);
-            settings.applyTo(group);
-
+            // every check before any change: the store hands out its own object, so a mutation
+            // made before a later refusal would stay visible
             if (userIdsToAdd != null) {
                 for (String userId : userIdsToAdd) {
-                    getUser(userId); // validate user exists
-                    group.getAssociatedUserIds().add(userId);
+                    getUser(userId);
                 }
+            }
+            settings.applyTo(group);
+            if (userIdsToAdd != null) {
+                group.getAssociatedUserIds().addAll(userIdsToAdd);
             }
             if (userIdsToRemove != null) {
                 group.getAssociatedUserIds().removeAll(userIdsToRemove);

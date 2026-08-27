@@ -33,7 +33,8 @@ public record ReplicationGroupSettings(Boolean atRestEncryptionEnabled,
 
     /** The checks a live account applies to these parameters, with its wording. */
     public void validate() {
-        if (kmsKeyId != null && !kmsKeyId.isBlank() && Boolean.FALSE.equals(atRestEncryptionEnabled)) {
+        // an omitted AtRestEncryptionEnabled is false on a live account, and refused the same way
+        if (kmsKeyId != null && !kmsKeyId.isBlank() && !Boolean.TRUE.equals(atRestEncryptionEnabled)) {
             throw new AwsException("InvalidParameterCombination",
                     "Please enable encryption at rest to use Customer Managed CMK", 400);
         }

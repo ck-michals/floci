@@ -290,6 +290,11 @@ class ElastiCacheServiceTest {
                 new ReplicationGroupSettings(false, KEY_ARN, null, null), Map.of()));
         assertEquals("InvalidParameterCombination", combination.getErrorCode());
         assertEquals("Please enable encryption at rest to use Customer Managed CMK", combination.getMessage());
+        // leaving AtRestEncryptionEnabled out is false on a live account, refused the same way
+        AwsException omitted = assertThrows(AwsException.class, () -> service.createReplicationGroup(
+                "g1", "d", AuthMode.NO_AUTH, null, "us-east-1",
+                new ReplicationGroupSettings(null, KEY_ARN, null, null), Map.of()));
+        assertEquals("InvalidParameterCombination", omitted.getErrorCode());
 
         AwsException retention = assertThrows(AwsException.class, () -> service.createReplicationGroup(
                 "g1", "d", AuthMode.NO_AUTH, null, "us-east-1",
@@ -321,6 +326,14 @@ class ElastiCacheServiceTest {
 
         assertThrows(AwsException.class, () -> service.modifyReplicationGroup("g1", null, null,
                 new ReplicationGroupSettings(null, null, null, "25:00-26:00")));
+        assertEquals("01:00-02:00", service.getReplicationGroup("g1").getSnapshotWindow());
+
+        // a refusal later in the same request must not leave the earlier part applied: the store
+        // hands out its own object, so settings applied before the user check would stay visible
+        AwsException unknownUser = assertThrows(AwsException.class, () -> service.modifyReplicationGroup(
+                "g1", List.of("no-such-user"), null, new ReplicationGroupSettings(null, null, 9, "03:00-04:00")));
+        assertEquals("UserNotFoundFault", unknownUser.getErrorCode());
+        assertEquals(3, service.getReplicationGroup("g1").getSnapshotRetentionLimit());
         assertEquals("01:00-02:00", service.getReplicationGroup("g1").getSnapshotWindow());
     }
 
