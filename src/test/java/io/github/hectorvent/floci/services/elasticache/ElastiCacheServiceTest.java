@@ -308,6 +308,15 @@ class ElastiCacheServiceTest {
                 "g1", "d", AuthMode.NO_AUTH, null, "us-east-1",
                 new ReplicationGroupSettings(null, null, null, "05:00-05:30"), Map.of()));
         assertEquals("Snapshot window must be at least 60 minutes.", shortWindow.getMessage());
+        // equal start and end is an empty window, not a full day
+        AwsException emptyWindow = assertThrows(AwsException.class, () -> service.createReplicationGroup(
+                "g1", "d", AuthMode.NO_AUTH, null, "us-east-1",
+                new ReplicationGroupSettings(null, null, null, "05:00-05:00"), Map.of()));
+        assertEquals("Snapshot window must be at least 60 minutes.", emptyWindow.getMessage());
+        // while a window wrapping midnight is measured across it
+        service.createReplicationGroup("wrap", "d", AuthMode.NO_AUTH, null, "us-east-1",
+                new ReplicationGroupSettings(null, null, null, "23:30-00:30"), Map.of());
+        assertEquals("23:30-00:30", service.getReplicationGroup("wrap").getSnapshotWindow());
     }
 
     @Test

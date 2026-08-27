@@ -54,7 +54,9 @@ public record ReplicationGroupSettings(Boolean atRestEncryptionEnabled,
         }
         int start = minuteOfDay(parts[0], window);
         int end = minuteOfDay(parts[1], window);
-        if (end <= start) {
+        // an end before the start wraps midnight; an end equal to the start is an empty window,
+        // which a live account refuses as shorter than an hour, not a full day
+        if (end < start) {
             end += MINUTES_PER_DAY;
         }
         if (end - start < MINIMUM_WINDOW_MINUTES) {

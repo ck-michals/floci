@@ -117,8 +117,10 @@ public class ElastiCacheQueryHandler {
 
     private static ReplicationGroupSettings replicationGroupSettings(MultivaluedMap<String, String> params) {
         String atRest = params.getFirst("AtRestEncryptionEnabled");
+        // A live account reads any value that is not "false" as true — "banana", "yes" and
+        // "TRUE " all created an encrypted group — so the flag is read the same way here.
         return new ReplicationGroupSettings(
-                atRest == null ? null : Boolean.parseBoolean(atRest),
+                atRest == null ? null : !"false".equalsIgnoreCase(atRest.trim()),
                 params.getFirst("KmsKeyId"),
                 optionalInt(params.getFirst("SnapshotRetentionLimit")),
                 params.getFirst("SnapshotWindow"));

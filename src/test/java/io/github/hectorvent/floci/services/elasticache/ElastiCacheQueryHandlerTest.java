@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -100,6 +101,33 @@ class ElastiCacheQueryHandlerTest {
 
         verify(service).createReplicationGroup(eq("g1"), eq("d"), eq(AuthMode.NO_AUTH), isNull(), eq("us-east-1"),
                 eq(new ReplicationGroupSettings(true, "alias/cache", 7, "06:30-07:30")), eq(Map.of("Name", "g1")));
+    }
+
+    @Test
+    void createReplicationGroup_readsTheEncryptionFlagAsAwsDoes() {
+        when(service.createReplicationGroup(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(group("g1"));
+        ArgumentCaptor<ReplicationGroupSettings> captor = ArgumentCaptor.forClass(ReplicationGroupSettings.class);
+        // a live account reads anything but "false" as true — probed with banana, yes and "TRUE "
+        for (String value : new String[] {"true", "banana", "yes", "TRUE "}) {
+            MultivaluedMap<String, String> p = params();
+            p.add("ReplicationGroupId", "g1");
+            p.add("AtRestEncryptionEnabled", value);
+            handler.handle("CreateReplicationGroup", p, "us-east-1");
+        }
+        for (String value : new String[] {"false", "FALSE"}) {
+            MultivaluedMap<String, String> p = params();
+            p.add("ReplicationGroupId", "g1");
+            p.add("AtRestEncryptionEnabled", value);
+            handler.handle("CreateReplicationGroup", p, "us-east-1");
+        }
+        MultivaluedMap<String, String> omitted = params();
+        omitted.add("ReplicationGroupId", "g1");
+        handler.handle("CreateReplicationGroup", omitted, "us-east-1");
+
+        verify(service, times(7)).createReplicationGroup(any(), any(), any(), any(), any(), captor.capture(), any());
+        List<Boolean> seen = captor.getAllValues().stream().map(ReplicationGroupSettings::atRestEncryptionEnabled).toList();
+        assertEquals(java.util.Arrays.asList(true, true, true, true, false, false, null), seen);
     }
 
     @Test
