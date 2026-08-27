@@ -1128,6 +1128,15 @@ public class RdsService implements Resettable, ResourceProvider {
                         ? DbInstanceSettings.maintenanceWindowAfter(backup)
                         : DbInstanceSettings.DEFAULT_MAINTENANCE_WINDOW;
             }
+            // a derived window is clear unless the given one leaves no 30-minute gap at all
+            if (DbInstanceSettings.windowsOverlap(backup, maintenance)) {
+                if (!maintenanceGiven) {
+                    throw DbInstanceSettings.noRoomForMaintenanceWindow();
+                }
+                if (!backupGiven) {
+                    throw DbInstanceSettings.noRoomForBackupWindow();
+                }
+            }
         } else {
             if (!backupGiven) {
                 backup = current.getPreferredBackupWindow() != null

@@ -88,6 +88,19 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         return String.format("%02d:%02d", m / 60, m % 60);
     }
 
+    /** A window given alone that leaves no room for the other kind, in AWS's words. */
+    public static AwsException noRoomForMaintenanceWindow() {
+        return new AwsException("InvalidParameterValue", "The specified backup window overlaps all "
+                + "available default maintenance windows. Shrink the backup window or specify a "
+                + "non-overlapping maintenance window.", 400);
+    }
+
+    public static AwsException noRoomForBackupWindow() {
+        return new AwsException("InvalidParameterValue", "The specified maintenance window overlaps "
+                + "all available default backup windows. Shrink the maintenance window or specify a "
+                + "non-overlapping backup window.", 400);
+    }
+
     public static AwsException overlappingWindows() {
         return new AwsException("InvalidParameterValue",
                 "The backup window and maintenance window must not overlap.", 400);
@@ -125,6 +138,10 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         if (end - start < MINIMUM_WINDOW_MINUTES) {
             throw new AwsException("InvalidParameterValue",
                     "Maintenance window must be at least " + MINIMUM_WINDOW_MINUTES + " minutes.", 400);
+        }
+        if (end - start >= MINUTES_PER_DAY) {
+            throw new AwsException("InvalidParameterValue",
+                    "Maintenance window must be less than 24 hours.", 400);
         }
         return new int[] {start, end};
     }

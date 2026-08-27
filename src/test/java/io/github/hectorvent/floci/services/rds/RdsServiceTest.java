@@ -5198,6 +5198,29 @@ class RdsServiceTest {
                 new DbInstanceSettings(null, null, null, null, "mon:04:30-mon:05:00", null));
         assertEquals("05:00-05:30", rdsService.getDbInstance("alone2").getPreferredBackupWindow());
 
+        // a window alone that leaves no 30-minute gap for the other kind, and a maintenance window
+        // of a day or more — both refused with AWS's wording
+        AwsException noRoom = assertThrows(AwsException.class, () -> rdsService.createDbInstance(
+                "mydb", "postgres", "13", "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, null, "00:00-23:45", null, null)));
+        assertEquals("The specified backup window overlaps all available default maintenance windows. "
+                + "Shrink the backup window or specify a non-overlapping maintenance window.", noRoom.getMessage());
+        AwsException noRoomForBackup = assertThrows(AwsException.class, () -> rdsService.createDbInstance(
+                "mydb", "postgres", "13", "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, null, null, "mon:00:00-mon:23:45", null)));
+        assertEquals("The specified maintenance window overlaps all available default backup windows. "
+                + "Shrink the maintenance window or specify a non-overlapping backup window.", noRoomForBackup.getMessage());
+        AwsException tooLong = assertThrows(AwsException.class, () -> rdsService.createDbInstance(
+                "mydb", "postgres", "13", "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, null, null, "mon:00:00-wed:00:00", null)));
+        assertEquals("Maintenance window must be less than 24 hours.", tooLong.getMessage());
+
         // AWS accepted a 40-day retention period, so it is not range-checked here
         rdsService.createDbInstance("mydb", "postgres", "13", "admin", "password", "dbname",
                 "db.t3.micro", 20, false, null, null, null, null, false, false, null,
