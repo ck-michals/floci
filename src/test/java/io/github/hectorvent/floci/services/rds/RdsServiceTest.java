@@ -96,7 +96,8 @@ class RdsServiceTest {
             "postgres18",
             "docdb3.6",
             "docdb4.0",
-            "docdb5.0");
+            "docdb5.0",
+            "docdb8.0");
 
     private RdsService rdsService;
     private RdsContainerManager containerManager;

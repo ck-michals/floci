@@ -95,7 +95,8 @@ public class RdsService implements Resettable, ResourceProvider {
             // versions map to); DocDbService validates a cluster's parameter group here
             managedDefault("docdb3.6"),
             managedDefault("docdb4.0"),
-            managedDefault("docdb5.0"));
+            managedDefault("docdb5.0"),
+            managedDefault("docdb8.0"));
 
     /**
      * Engines AWS accepts for {@code EngineName} on an option group. Floci can only run
