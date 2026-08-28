@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -285,13 +286,20 @@ public class DocDbService {
             if (rdsService == null) {
                 throw new IllegalStateException("DocDbService was built without an RdsService");
             }
+            DbClusterParameterGroup group;
             try {
-                rdsService.getDbClusterParameterGroup(parameterGroup, region);
+                group = rdsService.getDbClusterParameterGroup(parameterGroup, region);
             } catch (AwsException e) {
                 throw new AwsException("DBClusterParameterGroupNotFound",
                         "DBClusterParameterGroup not found: " + parameterGroup, 404);
             }
+            requireFamily(group, engineVersion);
         } else if (create) {
+            parameterGroup = "default." + parameterGroupFamily(engineVersion);
+        } else if (current.getDbClusterParameterGroupName() != null
+                && !current.getDbClusterParameterGroupName().endsWith(parameterGroupFamily(engineVersion))
+                && current.getDbClusterParameterGroupName().startsWith("default.")) {
+            // an engine version change moves a cluster on a default group to the new family's default
             parameterGroup = "default." + parameterGroupFamily(engineVersion);
         }
         List<String> securityGroups = settings.vpcSecurityGroupIds();
@@ -319,10 +327,21 @@ public class DocDbService {
             if (!backupGiven) {
                 backup = maintenanceGiven && BackupWindows.overlap(BackupWindows.DEFAULT_BACKUP_WINDOW, maintenance)
                         ? BackupWindows.backupWindowAfter(maintenance) : BackupWindows.DEFAULT_BACKUP_WINDOW;
+                if (maintenanceGiven && BackupWindows.overlap(backup, maintenance)) {
+                    // the given window leaves no daily half hour free
+                    throw new AwsException("InvalidParameterValue", "The specified maintenance window overlaps "
+                            + "all available default backup windows. Shrink the maintenance window or specify "
+                            + "a non-overlapping backup window.", 400);
+                }
             }
             if (!maintenanceGiven) {
                 maintenance = backupGiven && BackupWindows.overlap(backup, BackupWindows.DEFAULT_MAINTENANCE_WINDOW)
                         ? BackupWindows.maintenanceWindowAfter(backup) : BackupWindows.DEFAULT_MAINTENANCE_WINDOW;
+                if (BackupWindows.overlap(backup, maintenance)) {
+                    throw new AwsException("InvalidParameterValue", "The specified backup window overlaps "
+                            + "all available default maintenance windows. Shrink the backup window or specify "
+                            + "a non-overlapping maintenance window.", 400);
+                }
             }
         } else {
             if (!backupGiven) {
@@ -340,6 +359,16 @@ public class DocDbService {
         return new DocDbClusterSettings(subnetGroup, parameterGroup, securityGroups,
                 settings.storageEncrypted(), kmsKeyArn, settings.backupRetentionPeriod(),
                 backup, maintenance, settings.deletionProtection());
+    }
+
+    private static void requireFamily(DbClusterParameterGroup group, String engineVersion) {
+        String family = parameterGroupFamily(engineVersion);
+        if (group.getDbParameterGroupFamily() != null && !family.equals(group.getDbParameterGroupFamily())) {
+            throw new AwsException("InvalidParameterCombination", "The Parameter Group "
+                    + group.getDbClusterParameterGroupName() + " with DBParameterGroupFamily "
+                    + group.getDbParameterGroupFamily() + " cannot be used for this instance. "
+                    + "Please use a Parameter Group with DBParameterGroupFamily " + family, 400);
+        }
     }
 
     /** The parameter group family an engine version belongs to: {@code 5.0.0} is {@code docdb5.0}. */
@@ -526,10 +555,10 @@ public class DocDbService {
         synchronized (lockFor("cluster:" + key(region, id))) {
             DocDbCluster cluster = getDbCluster(id);
             // every check before any change: the store hands out its own object
-            DocDbClusterSettings resolved = resolveClusterSettings(settings, cluster, cluster.getEngineVersion(), region);
-            if (engineVersion != null && !engineVersion.isBlank()) {
-                cluster.setEngineVersion(engineVersion);
-            }
+            String effectiveEngineVersion = engineVersion != null && !engineVersion.isBlank()
+                    ? engineVersion : cluster.getEngineVersion();
+            DocDbClusterSettings resolved = resolveClusterSettings(settings, cluster, effectiveEngineVersion, region);
+            cluster.setEngineVersion(effectiveEngineVersion);
             if (iamEnabled != null) {
                 cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
             }
@@ -547,6 +576,10 @@ public class DocDbService {
                     new AwsException("DBClusterNotFoundFault",
                             "DocDB cluster " + id + " not found.", 404));
 
+            if (cluster.isDeletionProtection()) {
+                throw new AwsException("InvalidParameterCombination",
+                        "Cannot delete protected Cluster, please disable deletion protection and try again.", 400);
+            }
             if (cluster.getDbClusterMembers() != null && !cluster.getDbClusterMembers().isEmpty()) {
                 throw new AwsException("InvalidDBClusterStateFault",
                         "Cannot delete DocDB cluster " + id + " — it still has DB instances.", 400);

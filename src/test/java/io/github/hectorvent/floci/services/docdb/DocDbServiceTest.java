@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.docdb;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -357,6 +358,75 @@ class DocDbServiceTest {
         assertEquals(1, readInstance.getPromotionTier());
         assertEquals("mon:00:00-mon:03:00",
                 instanceStore.get("us-east-1::old-1").orElseThrow().getPreferredMaintenanceWindow());
+    }
+
+    @Test
+    void deleteDbClusterRefusesAProtectedClusterUntilProtectionIsTurnedOff() {
+        docDbService.createDbCluster("c1", "5.0.0", "u", "pw", false,
+                new DocDbClusterSettings(null, null, null, null, null, null, null, null, true), Map.of());
+        AwsException e = assertThrows(AwsException.class, () -> docDbService.deleteDbCluster("c1"));
+        assertEquals("InvalidParameterCombination", e.getErrorCode());
+        assertEquals("Cannot delete protected Cluster, please disable deletion protection and try again.", e.getMessage());
+        assertEquals("available", docDbService.getDbCluster("c1").getStatus());
+
+        docDbService.modifyDbCluster("c1", null, null,
+                new DocDbClusterSettings(null, null, null, null, null, null, null, null, false));
+        docDbService.deleteDbCluster("c1");
+        assertThrows(AwsException.class, () -> docDbService.getDbCluster("c1"));
+    }
+
+    @Test
+    void parameterGroupMustBelongToTheEngineVersionTheClusterWillRun() {
+        knownReferences();
+        when(rdsService.getDbClusterParameterGroup(eq("pg4"), any()))
+                .thenReturn(new DbClusterParameterGroup("pg4", "docdb4.0", "d"));
+        String expected = "The Parameter Group pg4 with DBParameterGroupFamily docdb4.0 cannot be used for this "
+                + "instance. Please use a Parameter Group with DBParameterGroupFamily docdb5.0";
+
+        AwsException e = refused(new DocDbClusterSettings(null, "pg4", null, null, null, null, null, null, null));
+        assertEquals("InvalidParameterCombination", e.getErrorCode());
+        assertEquals(expected, e.getMessage());
+
+        docDbService.createDbCluster("c1", "5.0.0", "u", "pw", false);
+        e = assertThrows(AwsException.class, () -> docDbService.modifyDbCluster("c1", null, null,
+                new DocDbClusterSettings(null, "pg4", null, null, null, null, null, null, null)));
+        assertEquals(expected, e.getMessage());
+        assertEquals("default.docdb5.0", docDbService.getDbCluster("c1").getDbClusterParameterGroupName());
+
+        // judged against the version the cluster will have, not the one it has
+        e = assertThrows(AwsException.class, () -> docDbService.modifyDbCluster("c1", "4.0.0", null,
+                new DocDbClusterSettings(null, "pg", null, null, null, null, null, null, null)));
+        assertEquals("The Parameter Group pg with DBParameterGroupFamily docdb5.0 cannot be used for this "
+                + "instance. Please use a Parameter Group with DBParameterGroupFamily docdb4.0", e.getMessage());
+        assertEquals("5.0.0", docDbService.getDbCluster("c1").getEngineVersion());
+
+        docDbService.modifyDbCluster("c1", "4.0.0", null, new DocDbClusterSettings(null, "pg4", null, null, null, null, null, null, null));
+        assertEquals("pg4", docDbService.getDbCluster("c1").getDbClusterParameterGroupName());
+
+        // a cluster on a default group follows the engine version to the new family's default
+        docDbService.createDbCluster("c2", "4.0.0", "u", "pw", false);
+        docDbService.modifyDbCluster("c2", "5.0.0", null);
+        assertEquals("default.docdb5.0", docDbService.getDbCluster("c2").getDbClusterParameterGroupName());
+    }
+
+    @Test
+    void aWindowThatLeavesNoRoomForTheDerivedOneIsRefused() {
+        AwsException e = refused(new DocDbClusterSettings(null, null, null, null, null, null, "00:00-23:45", null, null));
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertEquals("The specified backup window overlaps all available default maintenance windows. "
+                + "Shrink the backup window or specify a non-overlapping maintenance window.", e.getMessage());
+        e = refused(new DocDbClusterSettings(null, null, null, null, null, null, "23:00-22:59", null, null));
+        assertEquals("The specified backup window overlaps all available default maintenance windows. "
+                + "Shrink the backup window or specify a non-overlapping maintenance window.", e.getMessage());
+        e = refused(new DocDbClusterSettings(null, null, null, null, null, null, null, "mon:00:00-mon:23:45", null));
+        assertEquals("The specified maintenance window overlaps all available default backup windows. "
+                + "Shrink the maintenance window or specify a non-overlapping backup window.", e.getMessage());
+
+        docDbService.createDbCluster("c1", "5.0.0", "u", "pw", false,
+                new DocDbClusterSettings(null, null, null, null, null, null, "22:00-23:50", null, null), Map.of());
+        DocDbCluster stored = docDbService.getDbCluster("c1");
+        assertEquals("22:00-23:50", stored.getPreferredBackupWindow());
+        assertFalse(BackupWindows.overlap(stored.getPreferredBackupWindow(), stored.getPreferredMaintenanceWindow()));
     }
 
     private AwsException refused(DocDbClusterSettings settings) {
