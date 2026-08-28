@@ -1,12 +1,9 @@
 package io.github.hectorvent.floci.services.rds.model;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
-import java.util.List;
-import java.util.function.Supplier;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * The storage and backup settings of a DB instance as a request carries them: a null member is
@@ -20,15 +17,9 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                                  String preferredMaintenanceWindow,
                                  Boolean copyTagsToSnapshot) {
 
-    private static final Pattern TIME = Pattern.compile("^([01]\\d|2[0-3]):([0-5]\\d)$");
-    private static final List<String> DAYS = List.of("mon", "tue", "wed", "thu", "fri", "sat", "sun");
-    private static final int MINUTES_PER_DAY = 24 * 60;
-    private static final int MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY;
-    private static final int MINIMUM_WINDOW_MINUTES = 30;
-
     /** Where AWS picks a random 30-minute window, Floci picks these. */
-    public static final String DEFAULT_BACKUP_WINDOW = "04:00-06:00";
-    public static final String DEFAULT_MAINTENANCE_WINDOW = "mon:00:00-mon:03:00";
+    public static final String DEFAULT_BACKUP_WINDOW = BackupWindows.DEFAULT_BACKUP_WINDOW;
+    public static final String DEFAULT_MAINTENANCE_WINDOW = BackupWindows.DEFAULT_MAINTENANCE_WINDOW;
 
     public static DbInstanceSettings defaults() {
         return new DbInstanceSettings(null, null, null, null, null, null);
@@ -50,16 +41,16 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                     "You must enable StorageEncrypted when you specify KmsKeyId", 400);
         }
         if (preferredBackupWindow != null) {
-            parseBackupWindow(preferredBackupWindow);
+            BackupWindows.parseBackupWindow(preferredBackupWindow);
         }
         if (preferredMaintenanceWindow != null) {
-            parseMaintenanceWindow(preferredMaintenanceWindow);
+            BackupWindows.parseMaintenanceWindow(preferredMaintenanceWindow);
         }
     }
 
     /** Whether a daily backup window and a weekly maintenance window share any minute. */
     public static boolean windowsOverlap(String backupWindow, String maintenanceWindow) {
-        return overlap(parseBackupWindow(backupWindow), parseMaintenanceWindow(maintenanceWindow));
+        return BackupWindows.overlap(backupWindow, maintenanceWindow);
     }
 
     /**
@@ -68,24 +59,12 @@ public record DbInstanceSettings(Boolean storageEncrypted,
      * window is given.
      */
     public static String maintenanceWindowAfter(String backupWindow) {
-        int end = parseBackupWindow(backupWindow)[1] % MINUTES_PER_DAY;
-        return weeklyWindow(end, end + MINIMUM_WINDOW_MINUTES);
+        return BackupWindows.maintenanceWindowAfter(backupWindow);
     }
 
     /** A 30-minute daily backup window starting the minute the given maintenance window ends. */
     public static String backupWindowAfter(String maintenanceWindow) {
-        int end = parseMaintenanceWindow(maintenanceWindow)[1] % MINUTES_PER_DAY;
-        return time(end) + "-" + time(end + MINIMUM_WINDOW_MINUTES);
-    }
-
-    private static String weeklyWindow(int startMinuteOfDay, int endMinuteOfDay) {
-        return DAYS.get(0) + ":" + time(startMinuteOfDay) + "-"
-                + DAYS.get(endMinuteOfDay / MINUTES_PER_DAY) + ":" + time(endMinuteOfDay);
-    }
-
-    private static String time(int minuteOfDay) {
-        int m = minuteOfDay % MINUTES_PER_DAY;
-        return String.format("%02d:%02d", m / 60, m % 60);
+        return BackupWindows.backupWindowAfter(maintenanceWindow);
     }
 
     /** A window given alone that leaves no room for the other kind, in AWS's words. */
@@ -102,94 +81,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
     }
 
     public static AwsException overlappingWindows() {
-        return new AwsException("InvalidParameterValue",
-                "The backup window and maintenance window must not overlap.", 400);
-    }
-
-    /** Start and end as minutes of the day; the end is pushed past midnight when the window wraps. */
-    private static int[] parseBackupWindow(String window) {
-        String[] parts = window.split("-", -1);
-        if (parts.length != 2) {
-            throw invalidBackupTime(window);
-        }
-        int start = minuteOfDay(parts[0], () -> invalidBackupTime(parts[0]));
-        int end = minuteOfDay(parts[1], () -> invalidBackupTime(parts[1]));
-        if (end <= start) {
-            end += MINUTES_PER_DAY;
-        }
-        if (end - start < MINIMUM_WINDOW_MINUTES) {
-            throw new AwsException("InvalidParameterValue",
-                    "Backup window must be at least " + MINIMUM_WINDOW_MINUTES + " minutes.", 400);
-        }
-        return new int[] {start, end};
-    }
-
-    /** Start and end as minutes of the week; the end is pushed past Sunday when the window wraps. */
-    private static int[] parseMaintenanceWindow(String window) {
-        String[] parts = window.split("-", -1);
-        if (parts.length != 2) {
-            throw invalidMaintenanceTime(window);
-        }
-        int start = minuteOfWeek(parts[0]);
-        int end = minuteOfWeek(parts[1]);
-        if (end <= start) {
-            end += MINUTES_PER_WEEK;
-        }
-        if (end - start < MINIMUM_WINDOW_MINUTES) {
-            throw new AwsException("InvalidParameterValue",
-                    "Maintenance window must be at least " + MINIMUM_WINDOW_MINUTES + " minutes.", 400);
-        }
-        if (end - start >= MINUTES_PER_DAY) {
-            throw new AwsException("InvalidParameterValue",
-                    "Maintenance window must be less than 24 hours.", 400);
-        }
-        return new int[] {start, end};
-    }
-
-    private static int minuteOfWeek(String dayAndTime) {
-        int colon = dayAndTime.indexOf(':');
-        int day = colon < 0 ? -1 : DAYS.indexOf(dayAndTime.substring(0, colon).toLowerCase());
-        if (day < 0) {
-            throw invalidMaintenanceTime(dayAndTime);
-        }
-        return day * MINUTES_PER_DAY
-                + minuteOfDay(dayAndTime.substring(colon + 1), () -> invalidMaintenanceTime(dayAndTime));
-    }
-
-    private static int minuteOfDay(String time, Supplier<AwsException> invalid) {
-        Matcher m = TIME.matcher(time);
-        if (!m.matches()) {
-            throw invalid.get();
-        }
-        return Integer.parseInt(m.group(1)) * 60 + Integer.parseInt(m.group(2));
-    }
-
-    /**
-     * The backup window recurs every day, so it is laid over each day of the week and compared
-     * with the maintenance window in the same week, the week before and the week after — a
-     * window that wraps past Sunday midnight or before Monday midnight lands in a neighbour.
-     */
-    private static boolean overlap(int[] dailyBackup, int[] weeklyMaintenance) {
-        for (int day = 0; day < 7; day++) {
-            int start = day * MINUTES_PER_DAY + dailyBackup[0];
-            int end = day * MINUTES_PER_DAY + dailyBackup[1];
-            for (int shift : new int[] {-MINUTES_PER_WEEK, 0, MINUTES_PER_WEEK}) {
-                if (start < weeklyMaintenance[1] - shift && weeklyMaintenance[0] - shift < end) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private static AwsException invalidBackupTime(String time) {
-        return new AwsException("InvalidParameterValue", "Invalid backup window time '" + time
-                + "' specified. Should be specified as a time hh24:mi (24H Clock UTC). Example: 03:15", 400);
-    }
-
-    private static AwsException invalidMaintenanceTime(String time) {
-        return new AwsException("InvalidParameterValue", "Invalid maintenance window time '" + time
-                + "' specified. Should be specified as a time ddd:hh24:mi (24H Clock UTC). Example: Mon:00:15", 400);
+        return BackupWindows.overlapping();
     }
 
     public DbInstanceSettings withKmsKeyId(String resolvedKmsKeyId) {
