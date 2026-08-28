@@ -403,6 +403,16 @@ class DocDbServiceTest {
         docDbService.modifyDbCluster("c1", "4.0.0", null, new DocDbClusterSettings(null, "pg4", null, null, null, null, null, null, null));
         assertEquals("pg4", docDbService.getDbCluster("c1").getDbClusterParameterGroupName());
 
+        // a custom group of the old family is not carried across an engine version change
+        e = assertThrows(AwsException.class, () -> docDbService.modifyDbCluster("c1", "5.0.0", null));
+        assertEquals("InvalidParameterCombination", e.getErrorCode());
+        assertEquals("The current DB cluster parameter group pg4 is custom. You must explicitly specify a new "
+                + "DB cluster parameter group, either default or custom, for the engine version upgrade.", e.getMessage());
+        assertEquals("4.0.0", docDbService.getDbCluster("c1").getEngineVersion());
+        docDbService.modifyDbCluster("c1", "5.0.0", null, new DocDbClusterSettings(null, "pg", null, null, null, null, null, null, null));
+        assertEquals("pg", docDbService.getDbCluster("c1").getDbClusterParameterGroupName());
+        assertEquals("5.0.0", docDbService.getDbCluster("c1").getEngineVersion());
+
         // a cluster on a default group follows the engine version to the new family's default
         docDbService.createDbCluster("c2", "4.0.0", "u", "pw", false);
         docDbService.modifyDbCluster("c2", "5.0.0", null);

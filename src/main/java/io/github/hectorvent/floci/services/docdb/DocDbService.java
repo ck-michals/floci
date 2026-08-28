@@ -297,10 +297,17 @@ public class DocDbService {
         } else if (create) {
             parameterGroup = "default." + parameterGroupFamily(engineVersion);
         } else if (current.getDbClusterParameterGroupName() != null
-                && !current.getDbClusterParameterGroupName().endsWith(parameterGroupFamily(engineVersion))
-                && current.getDbClusterParameterGroupName().startsWith("default.")) {
-            // an engine version change moves a cluster on a default group to the new family's default
-            parameterGroup = "default." + parameterGroupFamily(engineVersion);
+                && !current.getDbClusterParameterGroupName().endsWith(parameterGroupFamily(engineVersion))) {
+            if (current.getDbClusterParameterGroupName().startsWith("default.")) {
+                // an engine version change moves a cluster on a default group to the new family's default
+                parameterGroup = "default." + parameterGroupFamily(engineVersion);
+            } else if (rdsService != null && !parameterGroupFamily(engineVersion).equals(
+                    currentParameterGroupFamily(current.getDbClusterParameterGroupName(), region))) {
+                throw new AwsException("InvalidParameterCombination", "The current DB cluster parameter group "
+                        + current.getDbClusterParameterGroupName() + " is custom. You must explicitly specify a "
+                        + "new DB cluster parameter group, either default or custom, for the engine version upgrade.",
+                        400);
+            }
         }
         List<String> securityGroups = settings.vpcSecurityGroupIds();
         if (securityGroups != null && !securityGroups.isEmpty()) {
@@ -359,6 +366,15 @@ public class DocDbService {
         return new DocDbClusterSettings(subnetGroup, parameterGroup, securityGroups,
                 settings.storageEncrypted(), kmsKeyArn, settings.backupRetentionPeriod(),
                 backup, maintenance, settings.deletionProtection());
+    }
+
+    /** The family of the group a cluster is on; a group deleted since is judged by nothing. */
+    private String currentParameterGroupFamily(String name, String region) {
+        try {
+            return rdsService.getDbClusterParameterGroup(name, region).getDbParameterGroupFamily();
+        } catch (AwsException e) {
+            return null;
+        }
     }
 
     private static void requireFamily(DbClusterParameterGroup group, String engineVersion) {
