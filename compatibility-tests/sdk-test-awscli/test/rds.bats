@@ -220,6 +220,19 @@ teardown() {
     aws_cmd ec2 delete-vpc --vpc-id "$VPC_ID" >/dev/null 2>&1 || true
 }
 
+@test "docdb: an engine version a live account does not list is refused" {
+    CLUSTER_ID="bats-docdb-version-$(unique_name)"
+    run aws_cmd docdb create-db-cluster --db-cluster-identifier "$CLUSTER_ID" --engine docdb \
+        --engine-version 9.9.9 --master-username u --master-user-password pw12345678
+    assert_failure
+    assert_output --partial 'InvalidParameterCombination'
+    assert_output --partial 'Cannot find version 9.9.9 for docdb'
+
+    run aws_cmd docdb describe-db-clusters --db-cluster-identifier "$CLUSTER_ID"
+    assert_failure
+    assert_output --partial 'DBClusterNotFoundFault'
+}
+
 @test "docdb: cluster settings given on create are returned by describe" {
     CLUSTER_ID="bats-docdb-settings-$(unique_name)"
     run aws_cmd kms create-key --description "$CLUSTER_ID"
