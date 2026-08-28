@@ -218,6 +218,8 @@ teardown() {
     aws_cmd ec2 delete-subnet --subnet-id "$S1" >/dev/null 2>&1 || true
     aws_cmd ec2 delete-subnet --subnet-id "$S2" >/dev/null 2>&1 || true
     aws_cmd ec2 delete-vpc --vpc-id "$VPC_ID" >/dev/null 2>&1 || true
+}
+
 @test "docdb: a DocumentDB cluster is listed by describe-db-clusters on both endpoints" {
     CLUSTER_ID="bats-docdb-list-$(unique_name)"
     aws_cmd docdb create-db-cluster --db-cluster-identifier "$CLUSTER_ID" \
