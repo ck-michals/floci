@@ -90,7 +90,12 @@ public class RdsService implements Resettable, ResourceProvider {
             managedDefault("postgres15"),
             managedDefault("postgres16"),
             managedDefault("postgres17"),
-            managedDefault("postgres18"));
+            managedDefault("postgres18"),
+            // DocumentDB clusters name these as their default (the families the DocDB engine
+            // versions map to); DocDbService validates a cluster's parameter group here
+            managedDefault("docdb3.6"),
+            managedDefault("docdb4.0"),
+            managedDefault("docdb5.0"));
 
     /**
      * Engines AWS accepts for {@code EngineName} on an option group. Floci can only run

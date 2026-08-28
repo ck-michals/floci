@@ -219,3 +219,37 @@ teardown() {
     aws_cmd ec2 delete-subnet --subnet-id "$S2" >/dev/null 2>&1 || true
     aws_cmd ec2 delete-vpc --vpc-id "$VPC_ID" >/dev/null 2>&1 || true
 }
+
+@test "docdb: cluster settings given on create are returned by describe" {
+    CLUSTER_ID="bats-docdb-settings-$(unique_name)"
+    run aws_cmd kms create-key --description "$CLUSTER_ID"
+    assert_success
+    KEY_ARN=$(json_get "$output" '.KeyMetadata.Arn')
+
+    run aws_cmd docdb create-db-cluster --db-cluster-identifier "$CLUSTER_ID" \
+        --engine docdb --master-username docdbadmin --master-user-password "secret99password" \
+        --storage-encrypted --kms-key-id "$KEY_ARN" --backup-retention-period 5 \
+        --preferred-backup-window 23:30-00:00 --preferred-maintenance-window sun:03:00-sun:04:00 \
+        --tags "Key=Name,Value=$CLUSTER_ID"
+    assert_success
+
+    run aws_cmd docdb describe-db-clusters --db-cluster-identifier "$CLUSTER_ID" \
+        --query 'DBClusters[0].[DBSubnetGroup,DBClusterParameterGroup,StorageEncrypted,KmsKeyId,BackupRetentionPeriod,PreferredBackupWindow,PreferredMaintenanceWindow,VpcSecurityGroups[0].VpcSecurityGroupId]'
+    assert_success
+    assert_output --partial '"default"'
+    assert_output --partial '"default.docdb5.0"'
+    assert_output --partial 'true'
+    assert_output --partial "$KEY_ARN"
+    assert_output --partial '5'
+    assert_output --partial '"23:30-00:00"'
+    assert_output --partial '"sun:03:00-sun:04:00"'
+    assert_output --partial '"sg-'
+
+    run aws_cmd docdb create-db-cluster --db-cluster-identifier "$CLUSTER_ID-x" \
+        --engine docdb --master-username docdbadmin --master-user-password "secret99password" \
+        --kms-key-id "$KEY_ARN"
+    assert_failure
+    assert_output --partial 'You cannot specify KMS key for unencrypted clusters.'
+
+    aws_cmd docdb delete-db-cluster --db-cluster-identifier "$CLUSTER_ID" --skip-final-snapshot >/dev/null 2>&1 || true
+}

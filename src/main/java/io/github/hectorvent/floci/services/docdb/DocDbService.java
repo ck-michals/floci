@@ -16,6 +16,13 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import io.github.hectorvent.floci.core.common.BackupWindows;
+import io.github.hectorvent.floci.services.docdb.model.DocDbClusterSettings;
+import io.github.hectorvent.floci.services.docdb.model.DocDbInstanceSettings;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import io.github.hectorvent.floci.services.rds.RdsService;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -39,6 +46,11 @@ public class DocDbService {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final DocDbContainerManager containerManager;
+    // DocumentDB subnet groups and cluster parameter groups are the RDS records reached through
+    // the rds scope; security groups are EC2's; a KMS key is resolved to its ARN as on AWS
+    private final RdsService rdsService;
+    private final Ec2Service ec2Service;
+    private final KmsService kmsService;
     /**
      * One monitor per stored record, taken by everything that writes it. A tag update is a
      * read-modify-write, so without a lock shared with delete it can put a deleted cluster back.
@@ -151,10 +163,16 @@ public class DocDbService {
     public DocDbService(EmulatorConfig config,
                         RegionResolver regionResolver,
                         DocDbContainerManager containerManager,
-                        StorageFactory storageFactory) {
+                        StorageFactory storageFactory,
+                        RdsService rdsService,
+                        Ec2Service ec2Service,
+                        KmsService kmsService) {
         this.config = config;
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
+        this.rdsService = rdsService;
+        this.ec2Service = ec2Service;
+        this.kmsService = kmsService;
         this.clusters = storageFactory.create("docdb", "docdb-clusters.json",
                 new TypeReference<Map<String, DocDbCluster>>() {});
         this.instances = storageFactory.create("docdb", "docdb-instances.json",
@@ -166,7 +184,19 @@ public class DocDbService {
     public DocDbCluster createDbCluster(String id, String engineVersion,
                                         String masterUsername, String masterPassword,
                                         boolean iamEnabled) {
+        return createDbCluster(id, engineVersion, masterUsername, masterPassword, iamEnabled,
+                DocDbClusterSettings.defaults(), Map.of());
+    }
+
+    public DocDbCluster createDbCluster(String id, String engineVersion,
+                                        String masterUsername, String masterPassword,
+                                        boolean iamEnabled, DocDbClusterSettings settings,
+                                        Map<String, String> tags) {
         String region = regionResolver.getRegion();
+        settings.validate();
+        String effectiveEngineVersion = engineVersion != null ? engineVersion : ENGINE_VERSION_DEFAULT;
+        // every reference checked and every default chosen before a container is started
+        DocDbClusterSettings resolved = resolveClusterSettings(settings, null, effectiveEngineVersion, region);
         synchronized (lockFor("cluster:" + key(region, id))) {
             if (findCluster(region, id).isPresent()) {
                 throw new AwsException("DBClusterAlreadyExistsFault",
@@ -184,6 +214,10 @@ public class DocDbService {
                     .replace("-", "").substring(0, 24).toUpperCase());
             cluster.setCreatedAt(Instant.now());
             cluster.setDbClusterMembers(new ArrayList<>());
+            resolved.applyTo(cluster);
+            if (tags != null && !tags.isEmpty()) {
+                cluster.setTags(new LinkedHashMap<>(tags));
+            }
 
             if (config.services().docdb().mock()) {
                 LOG.infov("Creating DocDB cluster {0} in mock mode (no container)", id);
@@ -221,13 +255,169 @@ public class DocDbService {
         }
     }
 
+    /**
+     * The settings that will be in effect after the request, with every reference checked the way
+     * a live account checks it: the subnet group and cluster parameter group must exist (RDS
+     * holds both), each security group must exist, a KMS key is resolved to its ARN. On create
+     * ({@code current} null) an omitted value takes the AWS default — the default subnet group,
+     * the family's default parameter group, the VPC's default security group, one day of backups
+     * and windows clear of each other; on modify it keeps the cluster's.
+     */
+    private DocDbClusterSettings resolveClusterSettings(DocDbClusterSettings settings, DocDbCluster current,
+                                                        String engineVersion, String region) {
+        boolean create = current == null;
+        String subnetGroup = settings.dbSubnetGroupName();
+        if (subnetGroup != null && !subnetGroup.isBlank()) {
+            if (rdsService == null) {
+                throw new IllegalStateException("DocDbService was built without an RdsService");
+            }
+            try {
+                rdsService.getDbSubnetGroup(subnetGroup, region);
+            } catch (AwsException e) {
+                throw new AwsException("DBSubnetGroupNotFoundFault",
+                        "DB subnet group '" + subnetGroup + "' does not exist.", 404);
+            }
+        } else if (create) {
+            subnetGroup = "default";
+        }
+        String parameterGroup = settings.dbClusterParameterGroupName();
+        if (parameterGroup != null && !parameterGroup.isBlank()) {
+            if (rdsService == null) {
+                throw new IllegalStateException("DocDbService was built without an RdsService");
+            }
+            try {
+                rdsService.getDbClusterParameterGroup(parameterGroup, region);
+            } catch (AwsException e) {
+                throw new AwsException("DBClusterParameterGroupNotFound",
+                        "DBClusterParameterGroup not found: " + parameterGroup, 404);
+            }
+        } else if (create) {
+            parameterGroup = "default." + parameterGroupFamily(engineVersion);
+        }
+        List<String> securityGroups = settings.vpcSecurityGroupIds();
+        if (securityGroups != null && !securityGroups.isEmpty()) {
+            if (ec2Service == null) {
+                throw new IllegalStateException("DocDbService was built without an Ec2Service");
+            }
+            for (String groupId : securityGroups) {
+                boolean known = ec2Service.describeSecurityGroups(region, List.of(groupId), null, Map.of())
+                        .stream().anyMatch(sg -> groupId.equals(sg.getGroupId()));
+                if (!known) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Invalid security group , groupId= " + groupId + ", groupName=.", 400);
+                }
+            }
+        } else if (create) {
+            securityGroups = List.of(Ec2Service.defaultSecurityGroupId(region));
+        }
+        String kmsKeyArn = resolveKmsKeyArn(settings.kmsKeyId(), region);
+        String backup = settings.preferredBackupWindow();
+        String maintenance = settings.preferredMaintenanceWindow();
+        boolean backupGiven = backup != null;
+        boolean maintenanceGiven = maintenance != null;
+        if (create) {
+            if (!backupGiven) {
+                backup = maintenanceGiven && BackupWindows.overlap(BackupWindows.DEFAULT_BACKUP_WINDOW, maintenance)
+                        ? BackupWindows.backupWindowAfter(maintenance) : BackupWindows.DEFAULT_BACKUP_WINDOW;
+            }
+            if (!maintenanceGiven) {
+                maintenance = backupGiven && BackupWindows.overlap(backup, BackupWindows.DEFAULT_MAINTENANCE_WINDOW)
+                        ? BackupWindows.maintenanceWindowAfter(backup) : BackupWindows.DEFAULT_MAINTENANCE_WINDOW;
+            }
+        } else {
+            if (!backupGiven) {
+                backup = current.getPreferredBackupWindow() != null
+                        ? current.getPreferredBackupWindow() : BackupWindows.DEFAULT_BACKUP_WINDOW;
+            }
+            if (!maintenanceGiven) {
+                maintenance = current.getPreferredMaintenanceWindow() != null
+                        ? current.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW;
+            }
+        }
+        if (BackupWindows.overlap(backup, maintenance)) {
+            throw BackupWindows.overlapping();
+        }
+        return new DocDbClusterSettings(subnetGroup, parameterGroup, securityGroups,
+                settings.storageEncrypted(), kmsKeyArn, settings.backupRetentionPeriod(),
+                backup, maintenance, settings.deletionProtection());
+    }
+
+    /** The parameter group family an engine version belongs to: {@code 5.0.0} is {@code docdb5.0}. */
+    static String parameterGroupFamily(String engineVersion) {
+        String version = engineVersion == null || engineVersion.isBlank() ? ENGINE_VERSION_DEFAULT : engineVersion;
+        String[] parts = version.split("\\.");
+        return "docdb" + parts[0] + "." + (parts.length > 1 ? parts[1] : "0");
+    }
+
+    /**
+     * A live account takes the key as an ARN, a key id, an alias ARN or an alias name and reports
+     * the key ARN on the cluster; a key it cannot use is one fault whatever the reason.
+     */
+    private String resolveKmsKeyArn(String kmsKeyId, String region) {
+        if (kmsKeyId == null || kmsKeyId.isBlank()) {
+            return null;
+        }
+        if (kmsService == null) {
+            throw new IllegalStateException("DocDbService was built without a KmsService; a KmsKeyId cannot be resolved");
+        }
+        KmsKey key;
+        try {
+            key = kmsService.describeKey(kmsKeyId, region);
+        } catch (AwsException e) {
+            throw kmsKeyNotAccessible(kmsKeyId);
+        }
+        if (!key.isEnabled() || "PendingDeletion".equals(key.getKeyState())) {
+            throw kmsKeyNotAccessible(kmsKeyId);
+        }
+        return key.getArn();
+    }
+
+    private static AwsException kmsKeyNotAccessible(String kmsKeyId) {
+        return new AwsException("KMSKeyNotAccessibleFault", "The specified KMS key [" + kmsKeyId
+                + "] does not exist, is not enabled or you do not have permissions to access it.", 400);
+    }
+
     public DocDbCluster getDbCluster(String id) {
         String region = regionResolver.getRegion();
         DocDbCluster cluster = findCluster(region, id).orElseThrow(() ->
                 new AwsException("DBClusterNotFoundFault",
                         "DocDB cluster " + id + " not found.", 404));
+        return filled(cluster, region);
+    }
+
+    /**
+     * A cluster with what a record written by an earlier version lacks: its ARN, and the settings
+     * a live account gives a cluster that names none — the default subnet group, the engine's
+     * default parameter group, the VPC's default security group and the default windows.
+     */
+    private DocDbCluster filled(DocDbCluster cluster, String region) {
+        String id = cluster.getDbClusterIdentifier();
+        boolean changed = false;
         if (cluster.getDbClusterArn() == null || cluster.getDbClusterArn().isBlank()) {
             cluster.setDbClusterArn(legacyArn(region, "cluster:" + id));
+            changed = true;
+        }
+        if (cluster.getDbSubnetGroupName() == null) {
+            cluster.setDbSubnetGroupName("default");
+            changed = true;
+        }
+        if (cluster.getDbClusterParameterGroupName() == null) {
+            cluster.setDbClusterParameterGroupName("default." + parameterGroupFamily(cluster.getEngineVersion()));
+            changed = true;
+        }
+        if (cluster.getVpcSecurityGroupIds() == null || cluster.getVpcSecurityGroupIds().isEmpty()) {
+            cluster.setVpcSecurityGroupIds(List.of(Ec2Service.defaultSecurityGroupId(region)));
+            changed = true;
+        }
+        if (cluster.getPreferredBackupWindow() == null) {
+            cluster.setPreferredBackupWindow(BackupWindows.DEFAULT_BACKUP_WINDOW);
+            changed = true;
+        }
+        if (cluster.getPreferredMaintenanceWindow() == null) {
+            cluster.setPreferredMaintenanceWindow(BackupWindows.DEFAULT_MAINTENANCE_WINDOW);
+            changed = true;
+        }
+        if (changed) {
             persistIfStillPresent(clusters, "cluster:" + key(region, id), key(region, id), cluster);
         }
         return cluster;
@@ -314,24 +504,36 @@ public class DocDbService {
             // resolve a same-named local cluster.
             if (filterId.startsWith("arn:")) {
                 return inRegion(clusters, region, DocDbCluster::getDbClusterIdentifier).stream()
+                        .map(c -> filled(c, region))
                         .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
                         .toList();
             }
-            return findCluster(region, filterId).map(List::of).orElseGet(List::of);
+            return findCluster(region, filterId).map(c -> List.of(filled(c, region))).orElseGet(List::of);
         }
-        return inRegion(clusters, region, DocDbCluster::getDbClusterIdentifier);
+        return inRegion(clusters, region, DocDbCluster::getDbClusterIdentifier).stream()
+                .map(c -> filled(c, region))
+                .toList();
     }
 
     public DocDbCluster modifyDbCluster(String id, String engineVersion, Boolean iamEnabled) {
+        return modifyDbCluster(id, engineVersion, iamEnabled, DocDbClusterSettings.unchanged());
+    }
+
+    public DocDbCluster modifyDbCluster(String id, String engineVersion, Boolean iamEnabled,
+                                        DocDbClusterSettings settings) {
         String region = regionResolver.getRegion();
+        settings.validate();
         synchronized (lockFor("cluster:" + key(region, id))) {
             DocDbCluster cluster = getDbCluster(id);
+            // every check before any change: the store hands out its own object
+            DocDbClusterSettings resolved = resolveClusterSettings(settings, cluster, cluster.getEngineVersion(), region);
             if (engineVersion != null && !engineVersion.isBlank()) {
                 cluster.setEngineVersion(engineVersion);
             }
             if (iamEnabled != null) {
                 cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
             }
+            resolved.applyTo(cluster);
             clusters.put(key(region, id), cluster);
             LOG.infov("DocDB cluster {0} modified", id);
             return cluster;
@@ -370,7 +572,16 @@ public class DocDbService {
     public DocDbInstance createDbInstance(String id, String dbClusterIdentifier,
                                           String dbInstanceClass, String engineVersion,
                                           boolean iamEnabled) {
+        return createDbInstance(id, dbClusterIdentifier, dbInstanceClass, engineVersion, iamEnabled,
+                DocDbInstanceSettings.defaults(), Map.of());
+    }
+
+    public DocDbInstance createDbInstance(String id, String dbClusterIdentifier,
+                                          String dbInstanceClass, String engineVersion,
+                                          boolean iamEnabled, DocDbInstanceSettings settings,
+                                          Map<String, String> tags) {
         String region = regionResolver.getRegion();
+        settings.validate();
         // Instance monitor before cluster monitor, the one order every path that holds both uses.
         synchronized (lockFor("instance:" + key(region, id))) {
             synchronized (lockFor("cluster:" + key(region, dbClusterIdentifier))) {
@@ -394,6 +605,12 @@ public class DocDbService {
                 instance.setDbiResourceId("db-" + UUID.randomUUID().toString()
                         .replace("-", "").substring(0, 24).toUpperCase());
                 instance.setCreatedAt(Instant.now());
+                instance.setPreferredMaintenanceWindow(cluster.getPreferredMaintenanceWindow() != null
+                        ? cluster.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW);
+                settings.applyTo(instance);
+                if (tags != null && !tags.isEmpty()) {
+                    instance.setTags(new LinkedHashMap<>(tags));
+                }
 
                 cluster.getDbClusterMembers().add(id);
                 clusters.put(key(region, dbClusterIdentifier), cluster);
@@ -410,8 +627,24 @@ public class DocDbService {
         DocDbInstance instance = findInstance(region, id).orElseThrow(() ->
                 new AwsException("DBInstanceNotFound",
                         "DocDB instance " + id + " not found.", 404));
+        return filled(instance, region);
+    }
+
+    /** An instance with its ARN and, as on a live account, its cluster's maintenance window. */
+    private DocDbInstance filled(DocDbInstance instance, String region) {
+        String id = instance.getDbInstanceIdentifier();
+        boolean changed = false;
         if (instance.getDbInstanceArn() == null || instance.getDbInstanceArn().isBlank()) {
             instance.setDbInstanceArn(legacyArn(region, "db:" + id));
+            changed = true;
+        }
+        if (instance.getPreferredMaintenanceWindow() == null) {
+            instance.setPreferredMaintenanceWindow(findCluster(region, instance.getDbClusterIdentifier())
+                    .map(c -> filled(c, region).getPreferredMaintenanceWindow())
+                    .orElse(BackupWindows.DEFAULT_MAINTENANCE_WINDOW));
+            changed = true;
+        }
+        if (changed) {
             persistIfStillPresent(instances, "instance:" + key(region, id), key(region, id), instance);
         }
         return instance;
@@ -424,16 +657,25 @@ public class DocDbService {
             // listDbClusters for why the match is against the stored ARN.
             if (filterId.startsWith("arn:")) {
                 return inRegion(instances, region, DocDbInstance::getDbInstanceIdentifier).stream()
+                        .map(i -> filled(i, region))
                         .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))
                         .toList();
             }
-            return findInstance(region, filterId).map(List::of).orElseGet(List::of);
+            return findInstance(region, filterId).map(i -> List.of(filled(i, region))).orElseGet(List::of);
         }
-        return inRegion(instances, region, DocDbInstance::getDbInstanceIdentifier);
+        return inRegion(instances, region, DocDbInstance::getDbInstanceIdentifier).stream()
+                .map(i -> filled(i, region))
+                .toList();
     }
 
     public DocDbInstance modifyDbInstance(String id, String dbInstanceClass, Boolean iamEnabled) {
+        return modifyDbInstance(id, dbInstanceClass, iamEnabled, DocDbInstanceSettings.defaults());
+    }
+
+    public DocDbInstance modifyDbInstance(String id, String dbInstanceClass, Boolean iamEnabled,
+                                          DocDbInstanceSettings settings) {
         String region = regionResolver.getRegion();
+        settings.validate();
         synchronized (lockFor("instance:" + key(region, id))) {
             DocDbInstance instance = getDbInstance(id);
             if (dbInstanceClass != null && !dbInstanceClass.isBlank()) {
@@ -442,6 +684,7 @@ public class DocDbService {
             if (iamEnabled != null) {
                 instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
             }
+            settings.applyTo(instance);
             instances.put(key(region, id), instance);
             LOG.infov("DocDB instance {0} modified", id);
             return instance;

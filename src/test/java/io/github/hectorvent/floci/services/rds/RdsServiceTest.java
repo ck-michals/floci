@@ -93,7 +93,10 @@ class RdsServiceTest {
             "postgres15",
             "postgres16",
             "postgres17",
-            "postgres18");
+            "postgres18",
+            "docdb3.6",
+            "docdb4.0",
+            "docdb5.0");
 
     private RdsService rdsService;
     private RdsContainerManager containerManager;
