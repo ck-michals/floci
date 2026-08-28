@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
+import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
@@ -37,6 +38,7 @@ class RdsQueryHandlerTest {
 
     private RdsService service;
     private DocDbQueryHandler docDbHandler;
+    private NeptuneQueryHandler neptuneHandler;
     private RdsQueryHandler handler;
 
     @BeforeEach
@@ -49,7 +51,8 @@ class RdsQueryHandlerTest {
         when(servicesConfig.rds()).thenReturn(rdsConfig);
         when(config.defaultAvailabilityZone()).thenReturn("us-east-1a");
         docDbHandler = mock(DocDbQueryHandler.class);
-        handler = new RdsQueryHandler(service, config, docDbHandler);
+        neptuneHandler = mock(NeptuneQueryHandler.class);
+        handler = new RdsQueryHandler(service, config, docDbHandler, neptuneHandler);
     }
 
     // ──────────────────────────── DBInstances XML tag ────────────────────────────
@@ -2177,5 +2180,44 @@ class RdsQueryHandlerTest {
         assertFalse(body.contains("<DBInstanceIdentifier>member</DBInstanceIdentifier>"), body);
         assertTrue(body.contains("<DBInstanceIdentifier>legacy</DBInstanceIdentifier>"), body);
         assertTrue(body.contains("<Engine>postgres</Engine>"), body);
+    }
+
+    @Test
+    void describeDbClusters_listFormIncludesNeptuneClustersAndTheEngineFilterSelectsThem() {
+        when(service.listDbClusters(null, null)).thenReturn(List.of(makeCluster("aurora")));
+        when(docDbHandler.clusterRowsXml(null)).thenReturn(List.of(
+                "<DBClusterIdentifier>docs</DBClusterIdentifier><Engine>docdb</Engine>"));
+        when(neptuneHandler.clusterRowsXml(null, null)).thenReturn(List.of(
+                "<DBClusterIdentifier>graph</DBClusterIdentifier><Engine>neptune</Engine>"));
+
+        String body = (String) handler.handle("DescribeDBClusters", params()).getEntity();
+        assertTrue(body.contains("<DBClusterIdentifier>aurora</DBClusterIdentifier>"), body);
+        assertTrue(body.contains("<DBClusterIdentifier>docs</DBClusterIdentifier>"), body);
+        assertTrue(body.contains("<DBClusterIdentifier>graph</DBClusterIdentifier>"), body);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "engine");
+        p.add("Filters.Filter.1.Values.Value.1", "neptune");
+        body = (String) handler.handle("DescribeDBClusters", p).getEntity();
+        assertFalse(body.contains("<DBClusterIdentifier>aurora</DBClusterIdentifier>"), body);
+        assertFalse(body.contains("<DBClusterIdentifier>docs</DBClusterIdentifier>"), body);
+        assertTrue(body.contains("<DBClusterIdentifier>graph</DBClusterIdentifier>"), body);
+        verify(docDbHandler, times(1)).clusterRowsXml(any());
+
+        p = params();
+        p.add("DBClusterIdentifier", "aurora");
+        handler.handle("DescribeDBClusters", p);
+        verify(neptuneHandler, times(2)).clusterRowsXml(any(), any());
+    }
+
+    @Test
+    void describeDbInstances_listFormIncludesNeptuneInstances() {
+        when(service.listDbInstances(null, null)).thenReturn(List.of());
+        when(docDbHandler.instanceRowsXml(null)).thenReturn(List.of());
+        when(neptuneHandler.instanceRowsXml(null, null)).thenReturn(List.of(
+                "<DBInstanceIdentifier>graph-1</DBInstanceIdentifier><Engine>neptune</Engine>"));
+
+        String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
+        assertTrue(body.contains("<DBInstanceIdentifier>graph-1</DBInstanceIdentifier>"), body);
     }
 }

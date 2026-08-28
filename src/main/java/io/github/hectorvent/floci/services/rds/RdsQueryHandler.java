@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
+import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
@@ -42,11 +43,14 @@ public class RdsQueryHandler {
 
     private final RdsService service;
     private final DocDbQueryHandler docDbQueryHandler;
+    private final NeptuneQueryHandler neptuneQueryHandler;
     private final EmulatorConfig config;
 
     @Inject
-    public RdsQueryHandler(RdsService service, EmulatorConfig config, DocDbQueryHandler docDbQueryHandler) {
+    public RdsQueryHandler(RdsService service, EmulatorConfig config, DocDbQueryHandler docDbQueryHandler,
+                           NeptuneQueryHandler neptuneQueryHandler) {
         this.docDbQueryHandler = docDbQueryHandler;
+        this.neptuneQueryHandler = neptuneQueryHandler;
         this.service = service;
         this.config = config;
     }
@@ -200,6 +204,11 @@ public class RdsQueryHandler {
                     && extractRdsFilterValues(params, "dbi-resource-id").isEmpty();
             if (listForm && (engines.isEmpty() || engines.contains(DOCDB_ENGINE))) {
                 for (String row : docDbQueryHandler.instanceRowsXml(filterId)) {
+                    xml.start("DBInstance").raw(row).end("DBInstance");
+                }
+            }
+            if (listForm && (engines.isEmpty() || engines.contains(NEPTUNE_ENGINE))) {
+                for (String row : neptuneQueryHandler.instanceRowsXml(filterId, region)) {
                     xml.start("DBInstance").raw(row).end("DBInstance");
                 }
             }
@@ -473,11 +482,19 @@ public class RdsQueryHandler {
                     xml.start("DBCluster").raw(dbClusterInnerXml(c)).end("DBCluster");
                 }
             }
-            // The list form covers the whole RDS family: a live account lists DocumentDB clusters
-            // here too. The identifier form is routed to the store that owns the identifier.
-            if ((identifier == null || identifier.isBlank()) && (engines.isEmpty() || engines.contains(DOCDB_ENGINE))) {
-                for (String row : docDbQueryHandler.clusterRowsXml(filterId)) {
-                    xml.start("DBCluster").raw(row).end("DBCluster");
+            // The list form covers the whole RDS family: a live account lists DocumentDB and
+            // Neptune clusters here too. The identifier form is routed to the store that owns the
+            // identifier.
+            if (identifier == null || identifier.isBlank()) {
+                if (engines.isEmpty() || engines.contains(DOCDB_ENGINE)) {
+                    for (String row : docDbQueryHandler.clusterRowsXml(filterId)) {
+                        xml.start("DBCluster").raw(row).end("DBCluster");
+                    }
+                }
+                if (engines.isEmpty() || engines.contains(NEPTUNE_ENGINE)) {
+                    for (String row : neptuneQueryHandler.clusterRowsXml(filterId, region)) {
+                        xml.start("DBCluster").raw(row).end("DBCluster");
+                    }
                 }
             }
             xml.end("DBClusters").start("Marker").end("Marker");
@@ -1620,12 +1637,14 @@ public class RdsQueryHandler {
      * Returns null if no matching filter is present.
      */
     private static final String DOCDB_ENGINE = "docdb";
+    private static final String NEPTUNE_ENGINE = "neptune";
 
     /**
      * Every engine name the RDS family knows (the CreateDBInstance / CreateDBCluster lists in the
-     * API reference, plus DocumentDB and Neptune, which share the API). A live account refuses an
-     * {@code engine} filter naming anything else, and answers an empty list for a known engine it
-     * holds nothing of — including ones Floci cannot create.
+     * API reference, plus DocumentDB and Neptune, which share the API and whose records the list
+     * form merges in). A live account refuses an {@code engine} filter naming anything else, and
+     * answers an empty list for a known engine it holds nothing of — including ones Floci cannot
+     * create.
      */
     private static final java.util.Set<String> KNOWN_ENGINES = java.util.Set.of(
             "aurora", "aurora-mysql", "aurora-postgresql", "mysql", "mariadb", "postgres",
@@ -1633,7 +1652,7 @@ public class RdsQueryHandler {
             "custom-sqlserver-dev", "custom-sqlserver-ee", "custom-sqlserver-se", "custom-sqlserver-web",
             "db2-ae", "db2-se", "oracle-ee", "oracle-ee-cdb", "oracle-se2", "oracle-se2-cdb",
             "sqlserver-ee", "sqlserver-ex", "sqlserver-se", "sqlserver-web",
-            DOCDB_ENGINE, "neptune");
+            DOCDB_ENGINE, NEPTUNE_ENGINE);
 
     /** The {@code engine} filter, lower-cased: a live account matches engine names case-insensitively. */
     private static List<String> engineFilter(MultivaluedMap<String, String> params) {

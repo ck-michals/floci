@@ -317,7 +317,9 @@ public class AwsQueryController {
                 }
                 yield rdsQueryHandler.handle(action, formParams, region);
             }
-            case "neptune" -> neptuneQueryHandler.handle(action, formParams);
+            case "neptune" -> isFamilyListing(action, formParams)
+                    ? rdsQueryHandler.handle(action, formParams, region)
+                    : neptuneQueryHandler.handle(action, formParams);
             case "docdb" -> {
                 // The same check as on the rds scope: DocumentDB is reachable under either, and a
                 // create that skipped it here would put a second record under an ARN RDS owns.
