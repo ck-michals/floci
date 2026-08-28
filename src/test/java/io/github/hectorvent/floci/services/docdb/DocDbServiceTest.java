@@ -413,6 +413,15 @@ class DocDbServiceTest {
         assertEquals("pg", docDbService.getDbCluster("c1").getDbClusterParameterGroupName());
         assertEquals("5.0.0", docDbService.getDbCluster("c1").getEngineVersion());
 
+        // the group's stored family decides, whatever its name says
+        when(rdsService.getDbClusterParameterGroup(eq("mine-docdb5.0"), any()))
+                .thenReturn(new DbClusterParameterGroup("mine-docdb5.0", "docdb4.0", "d"));
+        docDbService.createDbCluster("c3", "4.0.0", "u", "pw", false,
+                new DocDbClusterSettings(null, "mine-docdb5.0", null, null, null, null, null, null, null), Map.of());
+        e = assertThrows(AwsException.class, () -> docDbService.modifyDbCluster("c3", "5.0.0", null));
+        assertEquals("InvalidParameterCombination", e.getErrorCode());
+        assertEquals("4.0.0", docDbService.getDbCluster("c3").getEngineVersion());
+
         // a cluster on a default group follows the engine version to the new family's default
         docDbService.createDbCluster("c2", "4.0.0", "u", "pw", false);
         docDbService.modifyDbCluster("c2", "5.0.0", null);

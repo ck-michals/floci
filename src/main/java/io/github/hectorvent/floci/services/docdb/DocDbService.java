@@ -297,7 +297,8 @@ public class DocDbService {
         } else if (create) {
             parameterGroup = "default." + parameterGroupFamily(engineVersion);
         } else if (current.getDbClusterParameterGroupName() != null
-                && !current.getDbClusterParameterGroupName().endsWith(parameterGroupFamily(engineVersion))) {
+                && !parameterGroupFamily(engineVersion).equals(parameterGroupFamily(current.getEngineVersion()))) {
+            // judged by the group's stored family, never by its name: a custom group may be called anything
             if (current.getDbClusterParameterGroupName().startsWith("default.")) {
                 // an engine version change moves a cluster on a default group to the new family's default
                 parameterGroup = "default." + parameterGroupFamily(engineVersion);
