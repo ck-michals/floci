@@ -343,6 +343,7 @@ public class RdsService implements Resettable, ResourceProvider {
         restoreInstances();
         restoreProxies();
         backfillManagedSecretOwnership();
+        backfillInstanceEngineIdentifiers();
     }
 
     public void clear() {
@@ -550,6 +551,8 @@ public class RdsService implements Resettable, ResourceProvider {
         String instanceStorageResourceId = dbiResourceId;
         PlacementResolution placement;
 
+        String engineIdentifier = engineParam != null && !engineParam.isBlank()
+                ? engineParam.toLowerCase() : null;
         if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
             // Cluster member — share the cluster's container (none exists in mock mode)
             DbCluster cluster = Optional.ofNullable(
@@ -558,6 +561,9 @@ public class RdsService implements Resettable, ResourceProvider {
                     .orElseThrow(() ->
                     new AwsException("DBClusterNotFoundFault",
                             "DB cluster " + dbClusterIdentifier + " not found.", 404));
+            if (engineIdentifier == null && cluster.getEngineIdentifier() != null) {
+                engineIdentifier = cluster.getEngineIdentifier().toLowerCase();
+            }
             backendHost = cluster.getContainerHost();
             backendPort = cluster.getContainerPort();
             containerId = cluster.getContainerId();
@@ -613,6 +619,7 @@ public class RdsService implements Resettable, ResourceProvider {
         instance.setMultiAz(placement.multiAz());
         instance.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
         instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
+        instance.setEngineIdentifier(engineIdentifier);
 
         instance.setDbiResourceId(dbiResourceId);
         instance.setDbInstanceArn(dbInstanceArn);
@@ -840,6 +847,47 @@ public class RdsService implements Resettable, ResourceProvider {
             }
         } catch (RuntimeException e) {
             LOG.warnv(e, "Skipped the master user secret ownership backfill");
+        }
+    }
+
+    /**
+     * Gives an instance persisted before {@code engineIdentifier} existed the engine name AWS would
+     * report, and only when that name is known for certain: a cluster member takes its cluster's
+     * stored name (an Aurora member is aurora-postgresql, which the enum alone cannot say); a
+     * standalone instance takes the enum's, since a standalone RDS instance is never Aurora. A
+     * member whose cluster predates the field too is left unset rather than written down as the
+     * enum — a persisted guess would outlive the code that could later tell.
+     */
+    void backfillInstanceEngineIdentifiers() {
+        try {
+            for (DbInstance instance : allInstances()) {
+                if (instance.getEngineIdentifier() != null && !instance.getEngineIdentifier().isBlank()) {
+                    continue;
+                }
+                String accountId = accountIdFromArn(instance.getDbInstanceArn());
+                String region = regionFromArn(instance.getDbInstanceArn());
+                String engineIdentifier;
+                String clusterId = instance.getDbClusterIdentifier();
+                if (clusterId != null && !clusterId.isBlank()) {
+                    DbCluster cluster = findClusterForScope(accountId, region, clusterId);
+                    if (cluster == null || cluster.getEngineIdentifier() == null
+                            || cluster.getEngineIdentifier().isBlank()) {
+                        LOG.debugv("Instance {0} keeps no engine name: its cluster {1} has none stored",
+                                instance.getDbInstanceIdentifier(), clusterId);
+                        continue;
+                    }
+                    engineIdentifier = cluster.getEngineIdentifier().toLowerCase();
+                } else if (instance.getEngine() != null) {
+                    engineIdentifier = instance.getEngine().name().toLowerCase();
+                } else {
+                    continue;
+                }
+                instance.setEngineIdentifier(engineIdentifier);
+                putInstanceForScope(accountId, region, instance.getDbInstanceIdentifier(), instance);
+            }
+        } catch (RuntimeException e) {
+            // Reading persisted state must not be able to stop the emulator from starting.
+            LOG.warnv(e, "Skipped the instance engine name backfill");
         }
     }
 

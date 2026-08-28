@@ -2,8 +2,11 @@ package io.github.hectorvent.floci.services.rds;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
+import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
+import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
@@ -34,6 +37,8 @@ import static org.mockito.Mockito.*;
 class RdsQueryHandlerTest {
 
     private RdsService service;
+    private DocDbQueryHandler docDbHandler;
+    private NeptuneQueryHandler neptuneHandler;
     private RdsQueryHandler handler;
 
     @BeforeEach
@@ -45,7 +50,9 @@ class RdsQueryHandlerTest {
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.rds()).thenReturn(rdsConfig);
         when(config.defaultAvailabilityZone()).thenReturn("us-east-1a");
-        handler = new RdsQueryHandler(service, config);
+        docDbHandler = mock(DocDbQueryHandler.class);
+        neptuneHandler = mock(NeptuneQueryHandler.class);
+        handler = new RdsQueryHandler(service, config, docDbHandler, neptuneHandler);
     }
 
     // ──────────────────────────── DBInstances XML tag ────────────────────────────
@@ -2026,5 +2033,191 @@ class RdsQueryHandlerTest {
         assertEquals(200, handler.handle("CreateDBSubnetGroup", p).getStatus());
         verify(service).createDbSubnetGroup("tagged", "d", List.of("subnet-aaa", "subnet-bbb"), null,
                 java.util.Map.of("Name", "tagged", "env", "tst"));
+    }
+
+    // ──────────────────────────── RDS-family listing ────────────────────────────
+
+    @Test
+    void describeDbClusters_listFormIncludesDocumentDbClusters() {
+        DbCluster aurora = makeCluster("aurora");
+        when(service.listDbClusters(null, null)).thenReturn(List.of(aurora));
+        when(docDbHandler.clusterRowsXml(null)).thenReturn(List.of(
+                "<DBClusterIdentifier>docs</DBClusterIdentifier><Engine>docdb</Engine>"));
+
+        String body = (String) handler.handle("DescribeDBClusters", params()).getEntity();
+
+        assertTrue(body.contains("<DBClusterIdentifier>aurora</DBClusterIdentifier>"), body);
+        assertTrue(body.contains("<DBClusterIdentifier>docs</DBClusterIdentifier>"), body);
+    }
+
+    @Test
+    void describeDbClusters_identifierFormNeverConsultsDocumentDb() {
+        when(service.listDbClusters("aurora", null)).thenReturn(List.of(makeCluster("aurora")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "aurora");
+        assertEquals(200, handler.handle("DescribeDBClusters", p).getStatus());
+
+        verify(docDbHandler, never()).clusterRowsXml(any());
+    }
+
+    @Test
+    void describeDbClusters_engineFilterSelectsAcrossBothStores() {
+        DbCluster aurora = makeCluster("aurora");
+        aurora.setEngineIdentifier("aurora-postgresql");
+        when(service.listDbClusters(null, null)).thenReturn(List.of(aurora));
+        when(docDbHandler.clusterRowsXml(null)).thenReturn(List.of(
+                "<DBClusterIdentifier>docs</DBClusterIdentifier><Engine>docdb</Engine>"));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "engine");
+        p.add("Filters.Filter.1.Values.Value.1", "docdb");
+        String body = (String) handler.handle("DescribeDBClusters", p).getEntity();
+        assertFalse(body.contains("<DBClusterIdentifier>aurora</DBClusterIdentifier>"), body);
+        assertTrue(body.contains("<DBClusterIdentifier>docs</DBClusterIdentifier>"), body);
+
+        p = params();
+        p.add("Filters.Filter.1.Name", "engine");
+        p.add("Filters.Filter.1.Values.Value.1", "Aurora-PostgreSQL");
+        body = (String) handler.handle("DescribeDBClusters", p).getEntity();
+        assertTrue(body.contains("<DBClusterIdentifier>aurora</DBClusterIdentifier>"), body);
+        assertFalse(body.contains("<DBClusterIdentifier>docs</DBClusterIdentifier>"), body);
+        verify(docDbHandler, times(1)).clusterRowsXml(any());
+    }
+
+    @Test
+    void describeDbClusters_idFilterReachesDocumentDbToo() {
+        when(service.listDbClusters("docs", null)).thenReturn(List.of());
+        when(docDbHandler.clusterRowsXml("docs")).thenReturn(List.of(
+                "<DBClusterIdentifier>docs</DBClusterIdentifier><Engine>docdb</Engine>"));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "db-cluster-id");
+        p.add("Filters.Filter.1.Values.Value.1", "docs");
+        String body = (String) handler.handle("DescribeDBClusters", p).getEntity();
+
+        assertTrue(body.contains("<DBClusterIdentifier>docs</DBClusterIdentifier>"), body);
+    }
+
+    @Test
+    void describeDbInstances_listFormIncludesDocumentDbInstancesAndHonoursEngineFilter() {
+        DbInstance postgres = makeInstance("pg");
+        postgres.setEngine(DatabaseEngine.POSTGRES);
+        when(service.listDbInstances(null, null)).thenReturn(List.of(postgres));
+        when(docDbHandler.instanceRowsXml(null)).thenReturn(List.of(
+                "<DBInstanceIdentifier>docs-1</DBInstanceIdentifier><Engine>docdb</Engine>"));
+
+        String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
+        assertTrue(body.contains("<DBInstanceIdentifier>pg</DBInstanceIdentifier>"), body);
+        assertTrue(body.contains("<DBInstanceIdentifier>docs-1</DBInstanceIdentifier>"), body);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "engine");
+        p.add("Filters.Filter.1.Values.Value.1", "postgres");
+        body = (String) handler.handle("DescribeDBInstances", p).getEntity();
+        assertTrue(body.contains("<DBInstanceIdentifier>pg</DBInstanceIdentifier>"), body);
+        assertFalse(body.contains("<DBInstanceIdentifier>docs-1</DBInstanceIdentifier>"), body);
+
+        p = params();
+        p.add("DBInstanceIdentifier", "pg");
+        when(service.listDbInstances("pg", null)).thenReturn(List.of(postgres));
+        handler.handle("DescribeDBInstances", p);
+        verify(docDbHandler, times(1)).instanceRowsXml(any());
+    }
+
+    @Test
+    void describeDbClusters_engineFilterIsValidatedAgainstTheFamilysEngineNames() {
+        when(service.listDbClusters(null, null)).thenReturn(List.of(makeCluster("aurora")));
+        when(docDbHandler.clusterRowsXml(null)).thenReturn(List.of());
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "engine");
+        p.add("Filters.Filter.1.Values.Value.1", "nothing");
+        Response response = handler.handle("DescribeDBClusters", p);
+        assertEquals(400, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>InvalidParameterValue</Code>"), body);
+        assertTrue(body.contains("Unrecognized engine name: nothing"), body);
+
+        // an engine Floci cannot create is still a name AWS knows: an empty list, not a fault
+        p = params();
+        p.add("Filters.Filter.1.Name", "engine");
+        p.add("Filters.Filter.1.Values.Value.1", "oracle-ee");
+        response = handler.handle("DescribeDBClusters", p);
+        assertEquals(200, response.getStatus());
+        assertFalse(((String) response.getEntity()).contains("<DBClusterIdentifier>"), (String) response.getEntity());
+
+        p = params();
+        p.add("Filters.Filter.1.Name", "engine");
+        p.add("Filters.Filter.1.Values.Value.1", "bogus");
+        response = handler.handle("DescribeDBInstances", p);
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("Unrecognized engine name: bogus"));
+    }
+
+    @Test
+    void describeDbInstances_auroraMemberIsFilteredAndReportedByItsAuroraEngineName() {
+        DbInstance member = makeInstance("member");
+        member.setEngine(DatabaseEngine.POSTGRES);
+        member.setEngineIdentifier("aurora-postgresql");
+        DbInstance legacy = makeInstance("legacy");
+        legacy.setEngine(DatabaseEngine.POSTGRES);
+        when(service.listDbInstances(null, null)).thenReturn(List.of(member, legacy));
+        when(docDbHandler.instanceRowsXml(null)).thenReturn(List.of());
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "engine");
+        p.add("Filters.Filter.1.Values.Value.1", "aurora-postgresql");
+        String body = (String) handler.handle("DescribeDBInstances", p).getEntity();
+        assertTrue(body.contains("<DBInstanceIdentifier>member</DBInstanceIdentifier>"), body);
+        assertTrue(body.contains("<Engine>aurora-postgresql</Engine>"), body);
+        assertFalse(body.contains("<DBInstanceIdentifier>legacy</DBInstanceIdentifier>"), body);
+
+        p = params();
+        p.add("Filters.Filter.1.Name", "engine");
+        p.add("Filters.Filter.1.Values.Value.1", "postgres");
+        body = (String) handler.handle("DescribeDBInstances", p).getEntity();
+        assertFalse(body.contains("<DBInstanceIdentifier>member</DBInstanceIdentifier>"), body);
+        assertTrue(body.contains("<DBInstanceIdentifier>legacy</DBInstanceIdentifier>"), body);
+        assertTrue(body.contains("<Engine>postgres</Engine>"), body);
+    }
+
+    @Test
+    void describeDbClusters_listFormIncludesNeptuneClustersAndTheEngineFilterSelectsThem() {
+        when(service.listDbClusters(null, null)).thenReturn(List.of(makeCluster("aurora")));
+        when(docDbHandler.clusterRowsXml(null)).thenReturn(List.of(
+                "<DBClusterIdentifier>docs</DBClusterIdentifier><Engine>docdb</Engine>"));
+        when(neptuneHandler.clusterRowsXml(null, null)).thenReturn(List.of(
+                "<DBClusterIdentifier>graph</DBClusterIdentifier><Engine>neptune</Engine>"));
+
+        String body = (String) handler.handle("DescribeDBClusters", params()).getEntity();
+        assertTrue(body.contains("<DBClusterIdentifier>aurora</DBClusterIdentifier>"), body);
+        assertTrue(body.contains("<DBClusterIdentifier>docs</DBClusterIdentifier>"), body);
+        assertTrue(body.contains("<DBClusterIdentifier>graph</DBClusterIdentifier>"), body);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Filters.Filter.1.Name", "engine");
+        p.add("Filters.Filter.1.Values.Value.1", "neptune");
+        body = (String) handler.handle("DescribeDBClusters", p).getEntity();
+        assertFalse(body.contains("<DBClusterIdentifier>aurora</DBClusterIdentifier>"), body);
+        assertFalse(body.contains("<DBClusterIdentifier>docs</DBClusterIdentifier>"), body);
+        assertTrue(body.contains("<DBClusterIdentifier>graph</DBClusterIdentifier>"), body);
+        verify(docDbHandler, times(1)).clusterRowsXml(any());
+
+        p = params();
+        p.add("DBClusterIdentifier", "aurora");
+        handler.handle("DescribeDBClusters", p);
+        verify(neptuneHandler, times(2)).clusterRowsXml(any(), any());
+    }
+
+    @Test
+    void describeDbInstances_listFormIncludesNeptuneInstances() {
+        when(service.listDbInstances(null, null)).thenReturn(List.of());
+        when(docDbHandler.instanceRowsXml(null)).thenReturn(List.of());
+        when(neptuneHandler.instanceRowsXml(null, null)).thenReturn(List.of(
+                "<DBInstanceIdentifier>graph-1</DBInstanceIdentifier><Engine>neptune</Engine>"));
+
+        String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
+        assertTrue(body.contains("<DBInstanceIdentifier>graph-1</DBInstanceIdentifier>"), body);
     }
 }

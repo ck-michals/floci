@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
+import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
+import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
@@ -40,10 +42,15 @@ public class RdsQueryHandler {
     private static final Logger LOG = Logger.getLogger(RdsQueryHandler.class);
 
     private final RdsService service;
+    private final DocDbQueryHandler docDbQueryHandler;
+    private final NeptuneQueryHandler neptuneQueryHandler;
     private final EmulatorConfig config;
 
     @Inject
-    public RdsQueryHandler(RdsService service, EmulatorConfig config) {
+    public RdsQueryHandler(RdsService service, EmulatorConfig config, DocDbQueryHandler docDbQueryHandler,
+                           NeptuneQueryHandler neptuneQueryHandler) {
+        this.docDbQueryHandler = docDbQueryHandler;
+        this.neptuneQueryHandler = neptuneQueryHandler;
         this.service = service;
         this.config = config;
     }
@@ -186,9 +193,24 @@ public class RdsQueryHandler {
                 throw new AwsException("DBInstanceNotFound",
                         "DBInstance " + identifier + " not found.", 404);
             }
+            List<String> engines = engineFilter(params);
             XmlBuilder xml = new XmlBuilder().start("DBInstances");
             for (DbInstance i : result) {
-                xml.start("DBInstance").raw(dbInstanceInnerXml(i)).end("DBInstance");
+                if (engines.isEmpty() || engines.contains(instanceEngine(i))) {
+                    xml.start("DBInstance").raw(dbInstanceInnerXml(i)).end("DBInstance");
+                }
+            }
+            boolean listForm = (identifier == null || identifier.isBlank())
+                    && extractRdsFilterValues(params, "dbi-resource-id").isEmpty();
+            if (listForm && (engines.isEmpty() || engines.contains(DOCDB_ENGINE))) {
+                for (String row : docDbQueryHandler.instanceRowsXml(filterId)) {
+                    xml.start("DBInstance").raw(row).end("DBInstance");
+                }
+            }
+            if (listForm && (engines.isEmpty() || engines.contains(NEPTUNE_ENGINE))) {
+                for (String row : neptuneQueryHandler.instanceRowsXml(filterId, region)) {
+                    xml.start("DBInstance").raw(row).end("DBInstance");
+                }
             }
             xml.end("DBInstances").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBInstances", AwsNamespaces.RDS, xml.build())).build();
@@ -453,9 +475,27 @@ public class RdsQueryHandler {
                 throw new AwsException("DBClusterNotFoundFault",
                         "DBCluster " + identifier + " not found.", 404);
             }
+            List<String> engines = engineFilter(params);
             XmlBuilder xml = new XmlBuilder().start("DBClusters");
             for (DbCluster c : result) {
-                xml.start("DBCluster").raw(dbClusterInnerXml(c)).end("DBCluster");
+                if (engines.isEmpty() || engines.contains(clusterEngine(c))) {
+                    xml.start("DBCluster").raw(dbClusterInnerXml(c)).end("DBCluster");
+                }
+            }
+            // The list form covers the whole RDS family: a live account lists DocumentDB and
+            // Neptune clusters here too. The identifier form is routed to the store that owns the
+            // identifier.
+            if (identifier == null || identifier.isBlank()) {
+                if (engines.isEmpty() || engines.contains(DOCDB_ENGINE)) {
+                    for (String row : docDbQueryHandler.clusterRowsXml(filterId)) {
+                        xml.start("DBCluster").raw(row).end("DBCluster");
+                    }
+                }
+                if (engines.isEmpty() || engines.contains(NEPTUNE_ENGINE)) {
+                    for (String row : neptuneQueryHandler.clusterRowsXml(filterId, region)) {
+                        xml.start("DBCluster").raw(row).end("DBCluster");
+                    }
+                }
             }
             xml.end("DBClusters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBClusters", AwsNamespaces.RDS, xml.build())).build();
@@ -1198,7 +1238,7 @@ public class RdsQueryHandler {
 
     private String dbInstanceInnerXml(DbInstance i) {
         DbEndpoint ep = i.getEndpoint();
-        String engineStr = i.getEngine() != null ? i.getEngine().name() : "";
+        String engineStr = instanceEngine(i);
         String statusStr = i.getStatus() != null ? statusLabel(i.getStatus()) : "available";
 
         XmlBuilder xml = new XmlBuilder()
@@ -1596,6 +1636,53 @@ public class RdsQueryHandler {
      * {@code Filters.Filter.N.Name=filterName} / {@code Filters.Filter.N.Values.Value.1=value}.
      * Returns null if no matching filter is present.
      */
+    private static final String DOCDB_ENGINE = "docdb";
+    private static final String NEPTUNE_ENGINE = "neptune";
+
+    /**
+     * Every engine name the RDS family knows (the CreateDBInstance / CreateDBCluster lists in the
+     * API reference, plus DocumentDB and Neptune, which share the API and whose records the list
+     * form merges in). A live account refuses an {@code engine} filter naming anything else, and
+     * answers an empty list for a known engine it holds nothing of — including ones Floci cannot
+     * create.
+     */
+    private static final java.util.Set<String> KNOWN_ENGINES = java.util.Set.of(
+            "aurora", "aurora-mysql", "aurora-postgresql", "mysql", "mariadb", "postgres",
+            "custom-oracle-ee", "custom-oracle-ee-cdb", "custom-oracle-se2", "custom-oracle-se2-cdb",
+            "custom-sqlserver-dev", "custom-sqlserver-ee", "custom-sqlserver-se", "custom-sqlserver-web",
+            "db2-ae", "db2-se", "oracle-ee", "oracle-ee-cdb", "oracle-se2", "oracle-se2-cdb",
+            "sqlserver-ee", "sqlserver-ex", "sqlserver-se", "sqlserver-web",
+            DOCDB_ENGINE, NEPTUNE_ENGINE);
+
+    /** The {@code engine} filter, lower-cased: a live account matches engine names case-insensitively. */
+    private static List<String> engineFilter(MultivaluedMap<String, String> params) {
+        List<String> engines = extractRdsFilterValues(params, "engine").stream().map(String::toLowerCase).toList();
+        for (String engine : engines) {
+            if (!KNOWN_ENGINES.contains(engine)) {
+                throw new AwsException("InvalidParameterValue", "Unrecognized engine name: " + engine, 400);
+            }
+        }
+        return engines;
+    }
+
+    private static String clusterEngine(DbCluster c) {
+        String engine = c.getEngineIdentifier() != null
+                ? c.getEngineIdentifier()
+                : c.getEngine() != null ? c.getEngine().name() : "";
+        return engine.toLowerCase();
+    }
+
+    /**
+     * The engine name AWS reports for the instance: the one the request gave (an Aurora member
+     * says aurora-postgresql, not postgres), or the enum for a record persisted before it was kept.
+     */
+    private static String instanceEngine(DbInstance i) {
+        if (i.getEngineIdentifier() != null && !i.getEngineIdentifier().isBlank()) {
+            return i.getEngineIdentifier().toLowerCase();
+        }
+        return i.getEngine() != null ? i.getEngine().name().toLowerCase() : "";
+    }
+
     private static String extractRdsFilterValue(MultivaluedMap<String, String> params, String filterName) {
         List<String> values = extractRdsFilterValues(params, filterName);
         return values.isEmpty() ? null : values.getFirst();

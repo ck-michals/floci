@@ -14,7 +14,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | Action | Description |
 | --- | --- |
 | `CreateDBInstance` | Start a new database instance |
-| `DescribeDBInstances` | List instances and their connection info |
+| `DescribeDBInstances` | List instances and their connection info — the list form includes DocumentDB and Neptune instances and takes an `engine` filter |
 | `DeleteDBInstance` | Stop and remove an instance |
 | `ModifyDBInstance` | Update instance settings |
 | `RebootDBInstance` | Restart a database instance |
@@ -24,7 +24,7 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `ModifyDBSubnetGroup` | Update DB subnet group description and subnet list |
 | `DeleteDBSubnetGroup` | Delete a DB subnet group |
 | `CreateDBCluster` | Create an Aurora-compatible cluster |
-| `DescribeDBClusters` | List clusters |
+| `DescribeDBClusters` | List clusters — the list form covers the RDS family, DocumentDB and Neptune clusters included, and takes an `engine` filter |
 | `DeleteDBCluster` | Delete a cluster |
 | `ModifyDBCluster` | Update cluster settings |
 | `CreateDBParameterGroup` | Create a parameter group |

@@ -3830,12 +3830,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     // ─── Launch Templates ─────────────────────────────────────────────────────
 
-    public LaunchTemplate createLaunchTemplate(String region, String name, String imageId,
-                                               String instanceType, String keyName,
-                                               List<String> securityGroupIds, String userData,
-                                               String encodedUserData,
-                                               String iamInstanceProfileArn,
-                                               List<Tag> launchTemplateTags, List<Tag> instanceTags) {
+    public LaunchTemplate createLaunchTemplate(String region, String name, LaunchTemplateData data,
+                                               List<Tag> launchTemplateTags) {
+        return createLaunchTemplate(region, name, data, launchTemplateTags, null);
+    }
+
+    public LaunchTemplate createLaunchTemplate(String region, String name, LaunchTemplateData data,
+                                               List<Tag> launchTemplateTags, String versionDescription) {
         ensureDefaultResources(region);
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter LaunchTemplateName", 400);
@@ -3853,65 +3854,54 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         launchTemplate.setCreateTime(Instant.now());
         launchTemplate.setCreatedBy(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
         launchTemplate.setRegion(region);
-        launchTemplate.setImageId(imageId);
-        launchTemplate.setInstanceType(instanceType);
-        launchTemplate.setKeyName(keyName);
-        launchTemplate.setUserData(userData);
-        launchTemplate.setEncodedUserData(encodedUserData);
-        launchTemplate.setIamInstanceProfileArn(iamInstanceProfileArn);
-        if (securityGroupIds != null) {
-            launchTemplate.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
-        }
+        launchTemplate.setData(new LaunchTemplateData(data != null ? data : new LaunchTemplateData()));
         if (launchTemplateTags != null && !launchTemplateTags.isEmpty()) {
             launchTemplate.setTags(new ArrayList<>(launchTemplateTags));
             tags.put(launchTemplate.getLaunchTemplateId(), new ArrayList<>(launchTemplateTags));
         }
-        if (instanceTags != null && !instanceTags.isEmpty()) {
-            launchTemplate.setInstanceTags(new ArrayList<>(instanceTags));
+        launchTemplate.getVersions().put("1", new LaunchTemplateData(launchTemplate.getData()));
+        if (versionDescription != null && !versionDescription.isBlank()) {
+            launchTemplate.getVersionDescriptions().put("1", versionDescription);
+            launchTemplate.setVersionDescription(versionDescription);
         }
-        launchTemplate.getVersions().put("1", dataFrom(launchTemplate));
         launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         return launchTemplate;
     }
 
     public LaunchTemplate createLaunchTemplateVersion(String region, String id, String name,
-                                                      String sourceVersion,
-                                                      String imageId, String instanceType, String keyName,
-                                                      List<String> securityGroupIds, String userData,
-                                                      String encodedUserData,
-                                                      String iamInstanceProfileArn,
-                                                      List<Tag> instanceTags) {
+                                                      String sourceVersion, LaunchTemplateData data) {
+        return createLaunchTemplateVersion(region, id, name, sourceVersion, data, null);
+    }
+
+    /**
+     * A {@code SourceVersion} that is null or absent does not fall back to the latest version —
+     * per the EC2 API, "no source specified" means the new version starts from an empty
+     * {@link LaunchTemplateData}, populated only by whatever fields this request itself supplies.
+     * Only an explicit {@code SourceVersion} (including {@code $Latest} / {@code $Default}) causes
+     * inheritance.
+     */
+    public LaunchTemplate createLaunchTemplateVersion(String region, String id, String name,
+                                                      String sourceVersion, LaunchTemplateData data,
+                                                      String versionDescription) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         ensureLaunchTemplateVersions(launchTemplate);
         int latestVersion = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber()) + 1;
-        LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate,
-                resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber())));
+        LaunchTemplateData source;
+        if (sourceVersion == null || sourceVersion.isBlank()) {
+            source = new LaunchTemplateData();
+        } else {
+            source = versionData(launchTemplate,
+                    resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber()));
+        }
+        LaunchTemplateData merged = source.mergedWith(data != null ? data : new LaunchTemplateData());
         launchTemplate.setLatestVersionNumber(String.valueOf(latestVersion));
-        if (imageId != null && !imageId.isBlank()) {
-            data.setImageId(imageId);
+        launchTemplate.getVersions().put(String.valueOf(latestVersion), merged);
+        launchTemplate.setData(new LaunchTemplateData(merged));
+        if (versionDescription != null && !versionDescription.isBlank()) {
+            launchTemplate.getVersionDescriptions().put(String.valueOf(latestVersion), versionDescription);
         }
-        if (instanceType != null && !instanceType.isBlank()) {
-            data.setInstanceType(instanceType);
-        }
-        if (keyName != null && !keyName.isBlank()) {
-            data.setKeyName(keyName);
-        }
-        if (userData != null && !userData.isBlank()) {
-            data.setUserData(userData);
-            data.setEncodedUserData(encodedUserData);
-        }
-        if (iamInstanceProfileArn != null && !iamInstanceProfileArn.isBlank()) {
-            data.setIamInstanceProfileArn(iamInstanceProfileArn);
-        }
-        if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
-            data.setSecurityGroupIds(securityGroupIds);
-        }
-        if (instanceTags != null && !instanceTags.isEmpty()) {
-            data.setInstanceTags(instanceTags);
-        }
-        launchTemplate.getVersions().put(String.valueOf(latestVersion), data);
-        applyData(launchTemplate, data);
+        launchTemplate.setVersionDescription(launchTemplate.getVersionDescriptions().get(String.valueOf(latestVersion)));
         launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         return launchTemplate;
     }
@@ -3971,6 +3961,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * The instance-profile ARN a launch from {@code data} should use. A template given only a
+     * {@code Name} keeps that form as stored; the ARN is derived here, at launch time, instead of
+     * being written back into the template.
+     */
+    public String iamInstanceProfileArn(LaunchTemplateData data) {
+        if (data == null || data.getIamInstanceProfile() == null) {
+            return null;
+        }
+        LaunchTemplateData.IamInstanceProfile profile = data.getIamInstanceProfile();
+        if (profile.getArn() != null && !profile.getArn().isBlank()) {
+            return profile.getArn();
+        }
+        if (profile.getName() == null || profile.getName().isBlank()) {
+            return null;
+        }
+        return AwsArnUtils.Arn.of("iam", "", accountId, "instance-profile/" + profile.getName()).toString();
+    }
+
     public LaunchTemplateData resolveLaunchTemplateData(String region, String id, String name, String version) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
@@ -4019,7 +4028,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (!launchTemplate.getVersions().isEmpty()) {
             return;
         }
-        launchTemplate.getVersions().put(launchTemplate.getLatestVersionNumber(), dataFrom(launchTemplate));
+        launchTemplate.getVersions().put(launchTemplate.getLatestVersionNumber(),
+                new LaunchTemplateData(launchTemplate.getData()));
         launchTemplates.put(key(launchTemplate.getRegion(), launchTemplate.getLaunchTemplateId()), launchTemplate);
     }
 
@@ -4045,30 +4055,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return launchTemplate.getVersions().get(version);
     }
 
-    private LaunchTemplateData dataFrom(LaunchTemplate launchTemplate) {
-        LaunchTemplateData data = new LaunchTemplateData();
-        data.setImageId(launchTemplate.getImageId());
-        data.setInstanceType(launchTemplate.getInstanceType());
-        data.setKeyName(launchTemplate.getKeyName());
-        data.setUserData(launchTemplate.getUserData());
-        data.setEncodedUserData(launchTemplate.getEncodedUserData());
-        data.setIamInstanceProfileArn(launchTemplate.getIamInstanceProfileArn());
-        data.setSecurityGroupIds(launchTemplate.getSecurityGroupIds());
-        data.setInstanceTags(launchTemplate.getInstanceTags());
-        return data;
-    }
-
-    private void applyData(LaunchTemplate launchTemplate, LaunchTemplateData data) {
-        launchTemplate.setImageId(data.getImageId());
-        launchTemplate.setInstanceType(data.getInstanceType());
-        launchTemplate.setKeyName(data.getKeyName());
-        launchTemplate.setUserData(data.getUserData());
-        launchTemplate.setEncodedUserData(data.getEncodedUserData());
-        launchTemplate.setIamInstanceProfileArn(data.getIamInstanceProfileArn());
-        launchTemplate.setSecurityGroupIds(new ArrayList<>(data.getSecurityGroupIds()));
-        launchTemplate.setInstanceTags(data.getInstanceTags());
-    }
-
     private LaunchTemplate copyForVersion(LaunchTemplate source, String versionNumber) {
         LaunchTemplate copy = new LaunchTemplate();
         copy.setLaunchTemplateId(source.getLaunchTemplateId());
@@ -4079,7 +4065,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         copy.setCreatedBy(source.getCreatedBy());
         copy.setRegion(source.getRegion());
         copy.setTags(source.getTags());
-        applyData(copy, versionData(source, versionNumber));
+        copy.setData(new LaunchTemplateData(versionData(source, versionNumber)));
+        copy.setVersionDescription(source.getVersionDescriptions().get(versionNumber));
         return copy;
     }
 
@@ -4895,8 +4882,55 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
         addr.setInstanceId(instanceId);
         addr.setAssociationId("eipassoc-" + randomHex(17));
+        pointAddressAtInstance(addr, region, instanceId);
         addresses.put(key(region, allocationId), addr);
         return addr;
+    }
+
+    /**
+     * Re-points an associated EIP at an address that actually answers.
+     *
+     * <p>{@link #allocateAddress} can only invent a plausible {@code 54.x.x.x}, because at
+     * allocation time there is no instance to be reachable at. Real AWS then keeps that address
+     * fixed and makes the network route it; Floci cannot, so an EIP left at its allocated value
+     * routes nowhere — and it is precisely the value Terraform surfaces as
+     * {@code aws_eip.x.public_ip}, which is what test suites SSH into.
+     *
+     * <p>Rewriting on association is the more defensible of the two options. The alternative,
+     * keeping the fictional address and aliasing it to the real one, would need Floci to own
+     * routing or DNS on the client's machine, which it does not; and every client that reads
+     * the address out of the API and dials it directly — Terratest does exactly this — would
+     * still be handed something dead. Association is also the first moment the answer is
+     * knowable. The cost is a deliberate deviation from AWS: an EIP's public IP changes when it
+     * is associated. That is invisible to Terraform, for which {@code public_ip} is computed
+     * and refreshed from this same API, and the allocation stays coherent otherwise — the
+     * AllocationId, AssociationId and domain are untouched, and disassociation restores the
+     * allocated address.
+     */
+    private void pointAddressAtInstance(Address addr, String region, String instanceId) {
+        if (instanceId == null || instanceId.isBlank()) {
+            return;
+        }
+        Instance inst = instances.get(key(region, instanceId)).orElse(null);
+        if (inst == null) {
+            return;
+        }
+        if (addr.getAllocatedPublicIp() == null) {
+            addr.setAllocatedPublicIp(addr.getPublicIp());
+        }
+        String reachable = containerManager.reachablePublicAddress(inst);
+        if (reachable != null) {
+            addr.setPublicIp(reachable);
+            // An EIP association gives the instance a public address even in a subnet that does
+            // not map one on launch, exactly as on AWS.
+            inst.setPublicIpAddress(reachable);
+            inst.setPublicDnsName("127.0.0.1".equals(reachable) ? "localhost" : reachable);
+            instances.put(key(region, instanceId), inst);
+        }
+        addr.setPrivateIpAddress(inst.getPrivateIpAddress());
+        if (inst.getNetworkInterfaces() != null && !inst.getNetworkInterfaces().isEmpty()) {
+            addr.setNetworkInterfaceId(inst.getNetworkInterfaces().get(0).getNetworkInterfaceId());
+        }
     }
 
     private Address getRequiredAddress(String region, String allocationId) {
@@ -4913,6 +4947,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             if (addr.getRegion().equals(region) && associationId.equals(addr.getAssociationId())) {
                 addr.setInstanceId(null);
                 addr.setAssociationId(null);
+                addr.setNetworkInterfaceId(null);
+                addr.setPrivateIpAddress(null);
+                // Hand the allocation back its allocated address: with no instance behind it,
+                // there is nothing reachable left for it to stand for.
+                if (addr.getAllocatedPublicIp() != null) {
+                    addr.setPublicIp(addr.getAllocatedPublicIp());
+                }
                 addresses.put(key(region, addr.getAllocationId()), addr);
                 return;
             }
@@ -4929,10 +4970,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public List<Address> describeAddresses(String region, List<String> allocationIds, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
-        return addresses.scan(k -> true).stream()
+        List<Address> matched = addresses.scan(k -> true).stream()
                 .filter(a -> a.getRegion().equals(region))
                 .filter(a -> allocationIds.isEmpty() || allocationIds.contains(a.getAllocationId()))
                 .collect(Collectors.toList());
+        // An EIP can be associated before its instance has a container, and Docker hands out a
+        // different bridge IP after a stop/start, either of which would leave the association
+        // reporting an address that no longer answers. Re-resolve on read: this is the call
+        // Terraform refreshes public_ip from, so it is the last chance to be right.
+        for (Address addr : matched) {
+            if (addr.getInstanceId() != null) {
+                String before = addr.getPublicIp();
+                pointAddressAtInstance(addr, region, addr.getInstanceId());
+                if (!Objects.equals(before, addr.getPublicIp())) {
+                    addresses.put(key(region, addr.getAllocationId()), addr);
+                }
+            }
+        }
+        return matched;
     }
 
     // ─── Availability Zones & Regions ─────────────────────────────────────────

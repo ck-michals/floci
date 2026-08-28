@@ -4,7 +4,7 @@
 **Management Endpoint:** `POST http://localhost:4566/` with `Action=` param
 **Data Endpoint:** the `Endpoint` and `Port` returned by `DescribeDBClusters` (MongoDB wire protocol)
 
-Floci emulates Amazon DocumentDB by managing real [MongoDB](https://www.mongodb.com/) Docker containers behind an RDS-shaped control plane. DocumentDB is MongoDB-compatible, so the cluster endpoint returned by `DescribeDBClusters` speaks the MongoDB wire protocol and works with any standard MongoDB driver.
+Floci emulates Amazon DocumentDB by managing real [MongoDB](https://www.mongodb.com/) Docker containers behind an RDS-shaped control plane. As on AWS, the list form of `DescribeDBClusters` / `DescribeDBInstances` — on the `docdb` endpoint and the `rds` endpoint alike — returns DocumentDB, Neptune and RDS records together; the `engine` filter (`docdb`, `neptune`, `aurora-postgresql`, ...) narrows it. DocumentDB is MongoDB-compatible, so the cluster endpoint returned by `DescribeDBClusters` speaks the MongoDB wire protocol and works with any standard MongoDB driver.
 
 > **Always read the host and port from `DescribeDBClusters`** rather than assuming a fixed port. MongoDB listens on `27017` *inside* the container, but the port you connect to depends on how Floci runs:
 >

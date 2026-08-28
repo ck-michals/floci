@@ -4941,4 +4941,73 @@ class RdsServiceTest {
         assertEquals(Map.of("Name", "tagged", "env", "stg", "extra", "yes"),
                 rdsService.getDbSubnetGroup("tagged", "us-east-1").getTags());
     }
+
+    @Test
+    void createDbInstanceKeepsTheEngineNameTheRequestGave() {
+        rdsService.createDbCluster("aurora", "aurora-postgresql", null, "admin", "secret99password",
+                null, false, null);
+        rdsService.createDbInstance("member", "aurora-postgresql", "16",
+                "admin", "password", null, "db.t3.medium",
+                20, false, null, null, "aurora", null, false);
+        rdsService.createDbInstance("member-2", null, "16",
+                "admin", "password", null, "db.t3.medium",
+                20, false, null, null, "aurora", null, false);
+        rdsService.createDbInstance("plain", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        assertEquals("aurora-postgresql", rdsService.getDbInstance("member").getEngineIdentifier());
+        // a member created without Engine takes the cluster's
+        assertEquals("aurora-postgresql", rdsService.getDbInstance("member-2").getEngineIdentifier());
+        assertEquals("postgres", rdsService.getDbInstance("plain").getEngineIdentifier());
+    }
+
+    @Test
+    void restoreGivesAPersistedAuroraMemberItsClusterEngineName() {
+        // A member written by a floci that predates engineIdentifier carries only the enum, which
+        // says postgres for an aurora-postgresql cluster. The cluster still knows, and the restore
+        // reads it there, so the member is reported and filtered as aurora-postgresql.
+        InMemoryStorage<String, DbInstance> instances = new InMemoryStorage<>();
+        InMemoryStorage<String, DbCluster> clusters = new InMemoryStorage<>();
+        RdsService service = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.createDbCluster("aurora", "aurora-postgresql", null, "admin", "secret99password",
+                null, false, null);
+
+        DbInstance legacyMember = new DbInstance();
+        legacyMember.setDbInstanceIdentifier("legacy-member");
+        legacyMember.setEngine(DatabaseEngine.POSTGRES);
+        legacyMember.setDbClusterIdentifier("aurora");
+        legacyMember.setDbInstanceArn("arn:aws:rds:us-east-1:123456789012:db:legacy-member");
+        legacyMember.setStatus(DbInstanceStatus.AVAILABLE);
+        instances.put("us-east-1::legacy-member", legacyMember);
+        DbInstance legacyStandalone = new DbInstance();
+        legacyStandalone.setDbInstanceIdentifier("legacy-plain");
+        legacyStandalone.setEngine(DatabaseEngine.MARIADB);
+        legacyStandalone.setDbInstanceArn("arn:aws:rds:us-east-1:123456789012:db:legacy-plain");
+        legacyStandalone.setStatus(DbInstanceStatus.AVAILABLE);
+        instances.put("us-east-1::legacy-plain", legacyStandalone);
+
+        // a member of a cluster that predates the field itself: nothing certain to write, so
+        // nothing is written — the enum would persist postgres for what may be Aurora
+        DbCluster nameless = new DbCluster();
+        nameless.setDbClusterIdentifier("old-cluster");
+        nameless.setEngine(DatabaseEngine.POSTGRES);
+        nameless.setStatus(DbInstanceStatus.AVAILABLE);
+        nameless.setDbClusterArn("arn:aws:rds:us-east-1:123456789012:cluster:old-cluster");
+        clusters.put("us-east-1::old-cluster", nameless);
+        DbInstance orphanedMember = new DbInstance();
+        orphanedMember.setDbInstanceIdentifier("old-member");
+        orphanedMember.setEngine(DatabaseEngine.POSTGRES);
+        orphanedMember.setDbClusterIdentifier("old-cluster");
+        orphanedMember.setDbInstanceArn("arn:aws:rds:us-east-1:123456789012:db:old-member");
+        orphanedMember.setStatus(DbInstanceStatus.AVAILABLE);
+        instances.put("us-east-1::old-member", orphanedMember);
+
+        service.restorePersistedRuntime();
+
+        assertEquals("aurora-postgresql", service.getDbInstance("legacy-member").getEngineIdentifier());
+        assertEquals("mariadb", service.getDbInstance("legacy-plain").getEngineIdentifier());
+        assertNull(service.getDbInstance("old-member").getEngineIdentifier());
+    }
 }

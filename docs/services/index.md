@@ -18,7 +18,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [S3 Tables](s3tables.md) | `/buckets`, `/namespaces/*`, `/tables/*` | REST JSON | 25 |
 | [DynamoDB](dynamodb.md) | `POST /` + `X-Amz-Target: DynamoDB_20120810.*` | JSON 1.1 | 28 |
 | [DynamoDB Streams](dynamodb.md#streams) | `POST /` + `X-Amz-Target: DynamoDBStreams_20120810.*` | JSON 1.1 | 4 |
-| [Lambda](lambda.md) | `/2015-03-31/functions/...` | REST JSON | 30 |
+| [Lambda](lambda.md) | `/2015-03-31/functions/...` | REST JSON | 46 |
 | [Lambda MicroVMs](lambda-microvms.md) | `/2025-09-09/...` + `/2026-04-04/...` | REST JSON | 22 |
 | [API Gateway v1](api-gateway.md) | `/restapis/...` | REST JSON | 79 |
 | [API Gateway v2](api-gateway.md#v2) | `/v2/apis/...` | REST JSON | 53 + data-plane |
@@ -90,13 +90,14 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Service Quotas](servicequotas.md) | `POST /` + `X-Amz-Target: ServiceQuotasV20190624.*` | JSON 1.1 | 5 |
 | [AWS RAM](ram.md) | `POST /{operationname}` (lowercase), `DELETE /deleteresourceshare` | REST JSON | 12 |
 | [Control Tower](controltower.md) | `/list-landingzones`, `/get-landingzone`, `/create-landingzone`, `/*-baseline*` | REST JSON | 15 |
+| [Managed Prometheus (AMP)](managed-prometheus.md) | `/workspaces/*`, `/tags/*` | REST JSON | 8 |
 | [AWS Backup](backup.md) | `/backup-vaults/*`, `/backup/plans/*`, `/backup-jobs/*`, `/supported-resource-types` | REST JSON | 20 |
 | [AWS FIS](fis.md) | `/experimentTemplates/*`, `/experiments/*`, `/actions/*`, `/targetResourceTypes/*`, `/safetyLevers/*`, `/tags/*` | REST JSON | 26 |
 | [CloudFront](cloudfront.md) | `/2020-05-31/distribution/*`, `/2020-05-31/cache-policy/*`, `/2020-05-31/function/*` | REST XML | 50 |
 | [Route53](route53.md) | `/2013-04-01/hostedzone/*`, `/2013-04-01/healthcheck/*`, `/2013-04-01/change/*` | REST XML | 17 |
 | [Route 53 Resolver](route53resolver.md) | `POST /` + `X-Amz-Target: Route53Resolver.*` | JSON 1.1 | 18 |
 | [Cloud Map](cloudmap.md) | `POST /` + `X-Amz-Target: Route53AutoNaming_v20170314.*` | JSON 1.1 | 22 |
-| [AWS Config](config.md) | `POST /` + `X-Amz-Target: StarlingDoveService.*` | JSON 1.1 | 20 |
+| [AWS Config](config.md) | `POST /` + `X-Amz-Target: StarlingDoveService.*` | JSON 1.1 | 33 |
 | [CloudTrail](cloudtrail.md) | `POST /` + `X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.*` | JSON 1.1 | 9 |
 | [Textract](textract.md) | `POST /` + `X-Amz-Target: Textract.*` | JSON 1.1 | 6 |
 | [Transcribe](transcribe.md) | `POST /` + `X-Amz-Target: Transcribe.*` | JSON 1.1 | 8 |
