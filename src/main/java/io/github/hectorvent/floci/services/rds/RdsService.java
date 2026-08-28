@@ -2599,6 +2599,11 @@ public class RdsService implements Resettable, ResourceProvider {
         return unique.values();
     }
 
+    /** Whether a name is one of the default cluster parameter groups the service itself provides. */
+    public boolean isManagedClusterParameterGroup(String name) {
+        return managedClusterParameterGroup(name) != null;
+    }
+
     private static ManagedClusterParameterGroup managedClusterParameterGroup(String name) {
         for (ManagedClusterParameterGroup group : MANAGED_CLUSTER_PARAMETER_GROUPS) {
             if (group.name().equals(name)) {

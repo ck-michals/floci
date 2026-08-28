@@ -66,6 +66,8 @@ class DocDbServiceTest {
         ec2Service = Mockito.mock(Ec2Service.class);
         kmsService = Mockito.mock(KmsService.class);
         when(kmsService.describeKey(any(), any())).thenThrow(new AwsException("NotFoundException", "Key not found", 404));
+        when(rdsService.isManagedClusterParameterGroup(any())).thenAnswer(inv ->
+                List.of("default.docdb3.6", "default.docdb4.0", "default.docdb5.0").contains(inv.<String>getArgument(0)));
         docDbService = new DocDbService(config, regionResolver, containerManager, storageFactory,
                 rdsService, ec2Service, kmsService);
     }
@@ -421,6 +423,15 @@ class DocDbServiceTest {
         e = assertThrows(AwsException.class, () -> docDbService.modifyDbCluster("c3", "5.0.0", null));
         assertEquals("InvalidParameterCombination", e.getErrorCode());
         assertEquals("4.0.0", docDbService.getDbCluster("c3").getEngineVersion());
+
+        // a custom group is not a default one because of its name
+        when(rdsService.getDbClusterParameterGroup(eq("default.mine"), any()))
+                .thenReturn(new DbClusterParameterGroup("default.mine", "docdb4.0", "d"));
+        docDbService.createDbCluster("c4", "4.0.0", "u", "pw", false,
+                new DocDbClusterSettings(null, "default.mine", null, null, null, null, null, null, null), Map.of());
+        e = assertThrows(AwsException.class, () -> docDbService.modifyDbCluster("c4", "5.0.0", null));
+        assertEquals("InvalidParameterCombination", e.getErrorCode());
+        assertEquals("default.mine", docDbService.getDbCluster("c4").getDbClusterParameterGroupName());
 
         // a cluster on a default group follows the engine version to the new family's default
         docDbService.createDbCluster("c2", "4.0.0", "u", "pw", false);

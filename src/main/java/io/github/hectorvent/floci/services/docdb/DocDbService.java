@@ -298,8 +298,8 @@ public class DocDbService {
             parameterGroup = "default." + parameterGroupFamily(engineVersion);
         } else if (current.getDbClusterParameterGroupName() != null
                 && !parameterGroupFamily(engineVersion).equals(parameterGroupFamily(current.getEngineVersion()))) {
-            // judged by the group's stored family, never by its name: a custom group may be called anything
-            if (current.getDbClusterParameterGroupName().startsWith("default.")) {
+            // judged by what RDS holds for the group, never by its name: a custom group may be called anything
+            if (rdsService != null && rdsService.isManagedClusterParameterGroup(current.getDbClusterParameterGroupName())) {
                 // an engine version change moves a cluster on a default group to the new family's default
                 parameterGroup = "default." + parameterGroupFamily(engineVersion);
             } else if (rdsService != null && !parameterGroupFamily(engineVersion).equals(
