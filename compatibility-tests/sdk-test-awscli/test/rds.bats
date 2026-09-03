@@ -233,6 +233,26 @@ teardown() {
     assert_output --partial 'DBClusterNotFoundFault'
 }
 
+@test "docdb: a security group that exists is accepted on create" {
+    CLUSTER_ID="bats-docdb-sg-$(unique_name)"
+    run aws_cmd ec2 create-vpc --cidr-block 10.42.0.0/16
+    assert_success
+    VPC_ID=$(json_get "$output" '.Vpc.VpcId')
+    run aws_cmd ec2 create-security-group --group-name "$CLUSTER_ID" --description d --vpc-id "$VPC_ID"
+    assert_success
+    SG_ID=$(json_get "$output" '.GroupId')
+
+    run aws_cmd docdb create-db-cluster --db-cluster-identifier "$CLUSTER_ID" --engine docdb \
+        --master-username docdbadmin --master-user-password "secret99password" \
+        --vpc-security-group-ids "$SG_ID"
+    assert_success
+    run aws_cmd docdb describe-db-clusters --db-cluster-identifier "$CLUSTER_ID"
+    assert_success
+    assert_output --partial "\"VpcSecurityGroupId\": \"$SG_ID\""
+
+    aws_cmd docdb delete-db-cluster --db-cluster-identifier "$CLUSTER_ID" --skip-final-snapshot >/dev/null 2>&1 || true
+}
+
 @test "docdb: cluster settings given on create are returned by describe" {
     CLUSTER_ID="bats-docdb-settings-$(unique_name)"
     run aws_cmd kms create-key --description "$CLUSTER_ID"
