@@ -18,7 +18,7 @@ import static org.hamcrest.Matchers.containsString;
 
 /**
  * The settings a DocumentDB cluster is created with come back from DescribeDBClusters, as on a
- * live account — through the Query protocol, with a real KMS key from the KMS store and the
+ * live account: through the Query protocol, with a real KMS key from the KMS store and the
  * default subnet group, parameter group and security group.
  */
 @QuarkusTest
@@ -56,7 +56,7 @@ class DocDbClusterSettingsIntegrationTest {
     }
 
     /**
-     * A security group that exists is the case a live stack always sends — and the one a probe
+     * A security group that exists is the case a live stack always sends, and the one a probe
      * with a made-up id never reaches, because an unknown id is refused before its record is
      * consulted. 2.0.1 answered it with an internal error.
      */
