@@ -14,6 +14,12 @@ teardown() {
         aws_cmd secretsmanager delete-secret --secret-id "$MANAGED_SECRET_ARN" \
             --force-delete-without-recovery >/dev/null 2>&1 || true
     fi
+    # EC2 fixtures of the docdb security-group case, whether or not its assertions passed
+    if [ -n "${SG_ID:-}" ]; then
+        aws_cmd docdb delete-db-cluster --db-cluster-identifier "$CLUSTER_ID" --skip-final-snapshot >/dev/null 2>&1 || true
+        aws_cmd ec2 delete-security-group --group-id "$SG_ID" >/dev/null 2>&1 || true
+        aws_cmd ec2 delete-vpc --vpc-id "$VPC_ID" >/dev/null 2>&1 || true
+    fi
 }
 
 @test "RDS: create db instance returns resource identifiers" {
@@ -249,10 +255,6 @@ teardown() {
     run aws_cmd docdb describe-db-clusters --db-cluster-identifier "$CLUSTER_ID"
     assert_success
     assert_output --partial "\"VpcSecurityGroupId\": \"$SG_ID\""
-
-    aws_cmd docdb delete-db-cluster --db-cluster-identifier "$CLUSTER_ID" --skip-final-snapshot >/dev/null 2>&1 || true
-    aws_cmd ec2 delete-security-group --group-id "$SG_ID" >/dev/null 2>&1 || true
-    aws_cmd ec2 delete-vpc --vpc-id "$VPC_ID" >/dev/null 2>&1 || true
 }
 
 @test "docdb: cluster settings given on create are returned by describe" {
